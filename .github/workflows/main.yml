@@ -43,9 +43,17 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot_automatico.py
 
-      # 5. (Opzionale ma consigliato) Salva il file di report aggiornato nel repository
-      # Questo passaggio permette di mantenere la cronologia degli annunci tra un'esecuzione e l'altra
+      # 5. NUOVO: Carica lo screenshot solo se il passo precedente fallisce
+      - name: Upload screenshot on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: debug-screenshot
+          path: debug_screenshot.png
+
+      # 6. Salva il file di report aggiornato nel repository (viene eseguito solo se lo script non fallisce)
       - name: Commit and push if changed
+        if: success()
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
