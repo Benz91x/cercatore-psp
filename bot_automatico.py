@@ -9,6 +9,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 import os
 import re
 import requests
+from selenium_stealth import stealth # Importiamo la nuova libreria
 
 # --- IMPOSTAZIONI DI RICERCA "SMART" ---
 LINK = "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
@@ -63,15 +64,27 @@ def esegui_ricerca():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    # Nuove opzioni per tentare di bypassare errori di rete/SSL
     chrome_options.add_argument('--ignore-certificate-errors')
     chrome_options.add_argument('--allow-running-insecure-content')
+    # Opzioni aggiuntive per la modalità stealth
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
     
     driver = None
     try:
-        # Rimosso webdriver-manager, Selenium cercherà il driver nel PATH
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
+
+        # --- ATTIVAZIONE MODALITÀ STEALTH ---
+        # Questa è la modifica chiave per rendere il bot invisibile
+        stealth(driver,
+                languages=["it-IT", "it"],
+                vendor="Google Inc.",
+                platform="Win32",
+                webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine",
+                fix_hairline=True,
+                )
         
         print(f"Navigazione verso: {LINK}")
         driver.get(LINK)
