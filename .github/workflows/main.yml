@@ -19,9 +19,9 @@ jobs:
 
     # Passaggi (steps) da eseguire in sequenza
     steps:
-      # 1. Fa il "checkout" del codice dal nostro repository sulla macchina virtuale
+      # 1. Fa il "checkout" del codice dal nostro repository sulla macchina virtuale (versione aggiornata)
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       # 2. Imposta l'ambiente Python
       - name: Set up Python
@@ -43,10 +43,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot_automatico.py
 
-      # 5. NUOVO: Carica lo screenshot solo se il passo precedente fallisce
+      # 5. Carica lo screenshot solo se il passo precedente fallisce (versione aggiornata)
       - name: Upload screenshot on failure
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: debug-screenshot
           path: debug_screenshot.png
