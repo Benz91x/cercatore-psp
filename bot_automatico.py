@@ -89,7 +89,8 @@ def esegui_ricerca():
         driver.execute_script("window.scrollTo(0, 1000);")
         time.sleep(2)
 
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="SmallCard-module_card__"]')))
+        # Aumentiamo il tempo di attesa a 30 secondi
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="SmallCard-module_card__"]')))
         print("Annunci caricati.")
         
         soup = bs4.BeautifulSoup(driver.page_source, 'html.parser')
@@ -118,6 +119,14 @@ def esegui_ricerca():
                  annunci_filtrati.append(annuncio_obj)
         
         return annunci_filtrati
+    
+    except TimeoutException as e:
+        print("!!! ERRORE: Timeout durante l'attesa degli annunci. La pagina potrebbe essere bloccata o vuota.")
+        print("Salvataggio screenshot per debug...")
+        driver.save_screenshot('debug_screenshot.png')
+        print("Screenshot salvato come 'debug_screenshot.png'.")
+        # Rilancia l'eccezione per far fallire il workflow e attivare l'upload dell'artefatto
+        raise e
 
     finally:
         if driver:
@@ -131,23 +140,25 @@ if __name__ == "__main__":
     print(f"Trovati {len(link_precedenti)} link nella cronologia.")
     
     annunci_attuali = esegui_ricerca()
-    link_attuali = set(ann['link'] for ann in annunci_attuali)
     
-    link_nuovi = link_attuali - link_precedenti
+    if annunci_attuali is not None:
+        link_attuali = set(ann['link'] for ann in annunci_attuali)
+        link_nuovi = link_attuali - link_precedenti
+        
+        if not link_nuovi:
+            print("Nessun nuovo annuncio trovato.")
+        else:
+            print(f"Trovati {len(link_nuovi)} nuovi annunci!")
+            messaggio = f"🎉 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
+            for annuncio in annunci_attuali:
+                if annuncio['link'] in link_nuovi:
+                    messaggio += f"🆕 *{annuncio['titolo']}*\n"
+                    messaggio += f"   *Prezzo:* {annuncio['prezzo']}\n"
+                    messaggio += f"   *Link:* {annuncio['link']}\n\n"
+            
+            invia_messaggio_telegram(messaggio)
+        
+        # Aggiorna il file di cronologia con tutti i link trovati in questa esecuzione
+        salva_link_attuali(NOME_FILE_ANNUNCI, link_attuali)
     
-    if not link_nuovi:
-        print("Nessun nuovo annuncio trovato.")
-    else:
-        print(f"Trovati {len(link_nuovi)} nuovi annunci!")
-        messaggio = f"🎉 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
-        for annuncio in annunci_attuali:
-            if annuncio['link'] in link_nuovi:
-                messaggio += f"🆕 *{annuncio['titolo']}*\n"
-                messaggio += f"   *Prezzo:* {annuncio['prezzo']}\n"
-                messaggio += f"   *Link:* {annuncio['link']}\n\n"
-        
-        invia_messaggio_telegram(messaggio)
-        
-    # Aggiorna il file di cronologia con tutti i link trovati in questa esecuzione
-    salva_link_attuali(NOME_FILE_ANNUNCI, link_attuali)
     print("Ricerca completata.")
