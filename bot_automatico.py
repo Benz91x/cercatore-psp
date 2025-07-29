@@ -1,25 +1,23 @@
 import time
 import bs4
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
 import os
 import re
-import requests # Usiamo requests per inviare il messaggio a Telegram
+import requests
 
 # --- IMPOSTAZIONI DI RICERCA "SMART" ---
 LINK = "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
 BUDGET_MASSIMO = 50
 KEYWORD_DA_INCLUDERE = ['psp']
 KEYWORD_DA_ESCLUDERE = ['solo giochi', 'solo gioco', 'solo custodia', 'riparazione', 'cerco']
-NOME_FILE_ANNUNCI = "report_annunci_psp.txt" # Questo file verrà creato nell'ambiente di GitHub
+NOME_FILE_ANNUNCI = "report_annunci_psp.txt"
 
 # --- RECUPERO DEI SEGRETI DI GITHUB ---
-# GitHub Actions imposta i segreti come variabili d'ambiente
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -37,17 +35,11 @@ def salva_link_attuali(nome_file, link_set):
             f.write(link + '\n')
 
 def invia_messaggio_telegram(messaggio):
-    """Invia un messaggio alla chat specificata usando l'API di Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("ERRORE: Token o Chat ID di Telegram non trovati.")
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': messaggio,
-        'parse_mode': 'Markdown'
-    }
+    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': messaggio, 'parse_mode': 'Markdown'}
     try:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
@@ -67,16 +59,21 @@ def estrai_prezzo(testo_prezzo):
 def esegui_ricerca():
     print("Avvio del browser per lo scraping...")
     chrome_options = webdriver.ChromeOptions()
-    # Opzioni necessarie per l'ambiente di GitHub Actions
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
+    # Nuove opzioni per tentare di bypassare errori di rete/SSL
+    chrome_options.add_argument('--ignore-certificate-errors')
+    chrome_options.add_argument('--allow-running-insecure-content')
     
     driver = None
     try:
-        service = ChromeService(ChromeDriverManager().install())
+        # Rimosso webdriver-manager, Selenium cercherà il driver nel PATH
+        service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        print(f"Navigazione verso: {LINK}")
         driver.get(LINK)
 
         try:
@@ -89,7 +86,7 @@ def esegui_ricerca():
         driver.execute_script("window.scrollTo(0, 1000);")
         time.sleep(2)
 
-        # Aumentiamo il tempo di attesa a 30 secondi
+        print("In attesa che gli annunci vengano caricati...")
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="SmallCard-module_card__"]')))
         print("Annunci caricati.")
         
@@ -120,12 +117,12 @@ def esegui_ricerca():
         
         return annunci_filtrati
     
-    except TimeoutException as e:
-        print("!!! ERRORE: Timeout durante l'attesa degli annunci. La pagina potrebbe essere bloccata o vuota.")
+    except (TimeoutException, WebDriverException) as e:
+        print(f"!!! ERRORE: {type(e).__name__} durante l'esecuzione di Selenium.")
         print("Salvataggio screenshot per debug...")
-        driver.save_screenshot('debug_screenshot.png')
-        print("Screenshot salvato come 'debug_screenshot.png'.")
-        # Rilancia l'eccezione per far fallire il workflow e attivare l'upload dell'artefatto
+        if driver:
+            driver.save_screenshot('debug_screenshot.png')
+            print("Screenshot salvato come 'debug_screenshot.png'.")
         raise e
 
     finally:
@@ -139,26 +136,33 @@ if __name__ == "__main__":
     link_precedenti = carica_link_precedenti(NOME_FILE_ANNUNCI)
     print(f"Trovati {len(link_precedenti)} link nella cronologia.")
     
-    annunci_attuali = esegui_ricerca()
-    
-    if annunci_attuali is not None:
-        link_attuali = set(ann['link'] for ann in annunci_attuali)
-        link_nuovi = link_attuali - link_precedenti
+    try:
+        annunci_attuali = esegui_ricerca()
         
-        if not link_nuovi:
-            print("Nessun nuovo annuncio trovato.")
-        else:
-            print(f"Trovati {len(link_nuovi)} nuovi annunci!")
-            messaggio = f"🎉 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
-            for annuncio in annunci_attuali:
-                if annuncio['link'] in link_nuovi:
-                    messaggio += f"🆕 *{annuncio['titolo']}*\n"
-                    messaggio += f"   *Prezzo:* {annuncio['prezzo']}\n"
-                    messaggio += f"   *Link:* {annuncio['link']}\n\n"
+        if annunci_attuali is not None:
+            link_attuali = set(ann['link'] for ann in annunci_attuali)
+            link_nuovi = link_attuali - link_precedenti
             
-            invia_messaggio_telegram(messaggio)
+            if not link_nuovi:
+                print("Nessun nuovo annuncio trovato.")
+            else:
+                print(f"Trovati {len(link_nuovi)} nuovi annunci!")
+                messaggio = f"🎉 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
+                for annuncio in annunci_attuali:
+                    if annuncio['link'] in link_nuovi:
+                        messaggio += f"🆕 *{annuncio['titolo']}*\n"
+                        messaggio += f"   *Prezzo:* {annuncio['prezzo']}\n"
+                        messaggio += f"   *Link:* {annuncio['link']}\n\n"
+                
+                invia_messaggio_telegram(messaggio)
+            
+            salva_link_attuali(NOME_FILE_ANNUNCI, link_attuali)
         
-        # Aggiorna il file di cronologia con tutti i link trovati in questa esecuzione
-        salva_link_attuali(NOME_FILE_ANNUNCI, link_attuali)
-    
-    print("Ricerca completata.")
+        print("Ricerca completata con successo.")
+
+    except Exception as e:
+        print(f"Il workflow è fallito a causa di un errore: {e}")
+        # Invia una notifica di errore su Telegram
+        invia_messaggio_telegram(f"🤖 Ciao Alessandro, la ricerca automatica è fallita. 😵\n\n*Errore:* `{type(e).__name__}`\n\nControlla i log su GitHub per i dettagli.")
+        # Rilancia l'eccezione per assicurarsi che il workflow venga segnato come fallito
+        raise e
