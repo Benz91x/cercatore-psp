@@ -9,7 +9,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 import os
 import re
 import requests
-from selenium_stealth import stealth # Importiamo la nuova libreria
+from selenium_stealth import stealth
 
 # --- IMPOSTAZIONI DI RICERCA "SMART" ---
 LINK = "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
@@ -40,7 +40,13 @@ def invia_messaggio_telegram(messaggio):
         print("ERRORE: Token o Chat ID di Telegram non trovati.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': messaggio, 'parse_mode': 'Markdown'}
+    # --- MODIFICA APPLICATA QUI ---
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': messaggio,
+        'parse_mode': 'Markdown',
+        'disable_notification': False  # Assicura che la notifica venga inviata
+    }
     try:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
@@ -66,7 +72,6 @@ def esegui_ricerca():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument('--ignore-certificate-errors')
     chrome_options.add_argument('--allow-running-insecure-content')
-    # Opzioni aggiuntive per la modalità stealth
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
@@ -75,8 +80,6 @@ def esegui_ricerca():
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # --- ATTIVAZIONE MODALITÀ STEALTH ---
-        # Questa è la modifica chiave per rendere il bot invisibile
         stealth(driver,
                 languages=["it-IT", "it"],
                 vendor="Google Inc.",
@@ -175,7 +178,5 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"Il workflow è fallito a causa di un errore: {e}")
-        # Invia una notifica di errore su Telegram
         invia_messaggio_telegram(f"🤖 Ciao Alessandro, la ricerca automatica è fallita. 😵\n\n*Errore:* `{type(e).__name__}`\n\nControlla i log su GitHub per i dettagli.")
-        # Rilancia l'eccezione per assicurarsi che il workflow venga segnato come fallito
         raise e
