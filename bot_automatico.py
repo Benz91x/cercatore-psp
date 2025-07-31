@@ -10,6 +10,7 @@ import os
 import re
 import requests
 from selenium_stealth import stealth
+import urllib.parse
 
 # --- IMPOSTAZIONI DI RICERCA "SMART" ---
 LINK = "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
@@ -18,59 +19,54 @@ KEYWORD_DA_INCLUDERE = ['psp']
 KEYWORD_DA_ESCLUDERE = ['solo giochi', 'solo gioco', 'solo custodia', 'riparazione', 'cerco']
 NOME_FILE_ANNUNCI = "report_annunci_psp.txt"
 
-# --- RECUPERO DEI SEGRETI DI GITHUB ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# --- RECUPERO DEI SEGRETI DI GITHUB PER WHATSAPP ---
+WHATSAPP_PHONE = os.environ.get("WHATSAPP_PHONE")
+WHATSAPP_APIKEY = os.environ.get("WHATSAPP_APIKEY")
 
-# --- FUNZIONI PER GESTIRE IL FILE LOCALE E TELEGRAM ---
+# --- FUNZIONI PER GESTIRE IL FILE LOCALE E WHATSAPP ---
 
 def carica_link_precedenti(nome_file):
+    """Carica i link degli annunci già processati da un file di testo."""
     if not os.path.exists(nome_file):
         return set()
     with open(nome_file, 'r', encoding='utf-8') as f:
         return set(line.strip() for line in f)
 
 def salva_link_attuali(nome_file, link_set):
+    """Salva i link degli annunci trovati nel file di testo."""
     with open(nome_file, 'w', encoding='utf-8') as f:
         for link in sorted(list(link_set)):
             f.write(link + '\n')
 
-def invia_messaggio_telegram(messaggio):
+def invia_notifica_whatsapp(messaggio):
     """
-    Invia un messaggio a Telegram con gestione degli errori migliorata e timeout.
+    Invia una notifica a WhatsApp tramite l'API di CallMeBot.
     """
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("ERRORE: Token o Chat ID di Telegram non trovati nei segreti di GitHub.")
+    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
+        print("ERRORE: Numero di telefono o API Key di WhatsApp non trovati nei segreti di GitHub.")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': messaggio,
-        'parse_mode': 'Markdown',
-        'disable_notification': False # Esplicitamente impostato per inviare notifiche
-    }
+    # L'API di CallMeBot richiede che il messaggio sia codificato per l'URL
+    messaggio_codificato = urllib.parse.quote_plus(messaggio)
+    url = f"https://api.callmebot.com/whatsapp.php?phone={WHATSAPP_PHONE}&text={messaggio_codificato}&apikey={WHATSAPP_APIKEY}"
     
     try:
-        # Aggiunto un timeout di 10 secondi alla richiesta
-        response = requests.post(url, json=payload, timeout=10)
+        # È una richiesta GET, non POST
+        response = requests.get(url, timeout=15)
         
-        # Analisi più dettagliata della risposta
-        response_data = response.json()
-        if response.status_code == 200 and response_data.get("ok"):
-            print("Messaggio inviato con successo a Telegram!")
+        if response.status_code == 200:
+            print("Richiesta di notifica WhatsApp inviata con successo!")
+            print("Controlla il tuo telefono per il messaggio.")
         else:
-            print(f"Errore nell'invio del messaggio a Telegram.")
+            print(f"Errore nell'invio della notifica WhatsApp.")
             print(f"Status Code: {response.status_code}")
-            print(f"Risposta API: {response_data}")
+            print(f"Risposta API: {response.text}")
             
-    except requests.exceptions.Timeout:
-        print("ERRORE: La richiesta a Telegram è andata in timeout.")
     except requests.exceptions.RequestException as e:
-        print(f"ERRORE: Eccezione durante la richiesta a Telegram: {e}")
+        print(f"ERRORE: Eccezione durante la richiesta a CallMeBot: {e}")
 
 def estrai_prezzo(testo_prezzo):
+    """Estrae il valore numerico del prezzo da una stringa."""
     if not testo_prezzo: return None
     numeri = re.findall(r'\d+\.?\d*', testo_prezzo.replace(',', '.'))
     return float(numeri[0]) if numeri else None
@@ -78,6 +74,7 @@ def estrai_prezzo(testo_prezzo):
 # --- FUNZIONE PRINCIPALE DI SCRAPING ---
 
 def esegui_ricerca():
+    """Esegue lo scraping del sito Subito.it per trovare nuovi annunci."""
     print("Avvio del browser per lo scraping...")
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
@@ -177,14 +174,15 @@ if __name__ == "__main__":
                 print("Nessun nuovo annuncio trovato.")
             else:
                 print(f"Trovati {len(link_nuovi)} nuovi annunci!")
-                messaggio = f"� Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
+                # Messaggio formattato per WhatsApp (senza Markdown)
+                messaggio = f"🎮 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
                 for annuncio in annunci_attuali:
                     if annuncio['link'] in link_nuovi:
-                        messaggio += f"🆕 *{annuncio['titolo']}*\n"
-                        messaggio += f"   *Prezzo:* {annuncio['prezzo']}\n"
-                        messaggio += f"   *Link:* {annuncio['link']}\n\n"
+                        messaggio += f"🆕 {annuncio['titolo']}\n"
+                        messaggio += f"   Prezzo: {annuncio['prezzo']}\n"
+                        messaggio += f"   Link: {annuncio['link']}\n\n"
                 
-                invia_messaggio_telegram(messaggio)
+                invia_notifica_whatsapp(messaggio)
             
             salva_link_attuali(NOME_FILE_ANNUNCI, link_attuali)
         
@@ -192,5 +190,6 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"Il workflow è fallito a causa di un errore: {e}")
-        invia_messaggio_telegram(f"🤖 Ciao Alessandro, la ricerca automatica è fallita. 😵\n\n*Errore:* `{type(e).__name__}`\n\nControlla i log su GitHub per i dettagli.")
+        messaggio_errore = f"🤖 Ciao Alessandro, la ricerca automatica è fallita. 😵\n\nErrore: {type(e).__name__}\n\nControlla i log su GitHub per i dettagli."
+        invia_notifica_whatsapp(messaggio_errore)
         raise e
