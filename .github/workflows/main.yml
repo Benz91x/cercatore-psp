@@ -6,9 +6,9 @@ on:
   # Permette di avviarlo manualmente dalla pagina Actions di GitHub
   workflow_dispatch:
   
-  # Esecuzione ogni 20 minuti
+  # Esecuzione ogni 2 minuti
   schedule:
-    - cron: '*/20 * * * *'
+    - cron: '*/2 * * * *'
 
 # Permessi di scrittura per salvare la cronologia
 permissions:
