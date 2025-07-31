@@ -1,12 +1,12 @@
 # Nome del nostro flusso di lavoro (workflow)
-name: Cerca Annunci Subito
+name: Cerca Annunci Subito (WhatsApp)
 
 # Eventi che attivano il workflow
 on:
   # Permette di avviarlo manualmente dalla pagina Actions di GitHub
   workflow_dispatch:
   
-  # --- MODIFICA CHIAVE: Esecuzione ogni 20 minuti ---
+  # Esecuzione ogni 20 minuti
   schedule:
     - cron: '*/20 * * * *'
 
@@ -37,17 +37,17 @@ jobs:
       - name: Install Google Chrome
         uses: browser-actions/setup-chrome@v1
 
-      # 4. Installa le dipendenze Python, inclusa la libreria "stealth"
+      # 4. Installa le dipendenze Python
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install selenium beautifulsoup4 requests selenium-stealth
 
-      # 5. Esegue il nostro script Python
+      # 5. Esegue il nostro script Python con le credenziali WhatsApp
       - name: Run scraper script
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
         run: python bot_automatico.py
 
       # 6. Carica lo screenshot solo se il passo precedente fallisce
