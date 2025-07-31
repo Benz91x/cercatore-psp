@@ -14,7 +14,7 @@ import urllib.parse
 
 # --- IMPOSTAZIONI DI RICERCA "SMART" ---
 LINK = "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
-BUDGET_MASSIMO = 50
+BUDGET_MASSIMO = 100
 KEYWORD_DA_INCLUDERE = ['psp']
 KEYWORD_DA_ESCLUDERE = ['solo giochi', 'solo gioco', 'solo custodia', 'riparazione', 'cerco']
 NOME_FILE_ANNUNCI = "report_annunci_psp.txt"
