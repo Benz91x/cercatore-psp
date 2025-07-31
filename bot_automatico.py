@@ -36,25 +36,39 @@ def salva_link_attuali(nome_file, link_set):
             f.write(link + '\n')
 
 def invia_messaggio_telegram(messaggio):
+    """
+    Invia un messaggio a Telegram con gestione degli errori migliorata e timeout.
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("ERRORE: Token o Chat ID di Telegram non trovati.")
+        print("ERRORE: Token o Chat ID di Telegram non trovati nei segreti di GitHub.")
         return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # --- MODIFICA APPLICATA QUI ---
+    
     payload = {
         'chat_id': TELEGRAM_CHAT_ID,
         'text': messaggio,
         'parse_mode': 'Markdown',
-        'disable_notification': False  # Assicura che la notifica venga inviata
+        'disable_notification': False # Esplicitamente impostato per inviare notifiche
     }
+    
     try:
-        response = requests.post(url, json=payload)
-        if response.status_code == 200:
+        # Aggiunto un timeout di 10 secondi alla richiesta
+        response = requests.post(url, json=payload, timeout=10)
+        
+        # Analisi più dettagliata della risposta
+        response_data = response.json()
+        if response.status_code == 200 and response_data.get("ok"):
             print("Messaggio inviato con successo a Telegram!")
         else:
-            print(f"Errore nell'invio del messaggio: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"Eccezione durante l'invio del messaggio a Telegram: {e}")
+            print(f"Errore nell'invio del messaggio a Telegram.")
+            print(f"Status Code: {response.status_code}")
+            print(f"Risposta API: {response_data}")
+            
+    except requests.exceptions.Timeout:
+        print("ERRORE: La richiesta a Telegram è andata in timeout.")
+    except requests.exceptions.RequestException as e:
+        print(f"ERRORE: Eccezione durante la richiesta a Telegram: {e}")
 
 def estrai_prezzo(testo_prezzo):
     if not testo_prezzo: return None
@@ -163,7 +177,7 @@ if __name__ == "__main__":
                 print("Nessun nuovo annuncio trovato.")
             else:
                 print(f"Trovati {len(link_nuovi)} nuovi annunci!")
-                messaggio = f"🎉 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
+                messaggio = f"� Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
                 for annuncio in annunci_attuali:
                     if annuncio['link'] in link_nuovi:
                         messaggio += f"🆕 *{annuncio['titolo']}*\n"
