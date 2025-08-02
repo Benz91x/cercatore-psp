@@ -30,6 +30,14 @@ CONFIGURAZIONE_RICERCHE = [
         "keyword_da_includere": ['switch', 'oled'],
         "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante'],
         "file_cronologia": "report_annunci_switch.txt"
+    },
+    {
+        "nome_ricerca": "PlayStation 5",
+        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5&shp=true",
+        "budget_massimo": 200,
+        "keyword_da_includere": ['ps5', 'playstation 5', 'playstation5'],
+        "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante', 'controller', 'solo pad', 'cover', 'base'],
+        "file_cronologia": "report_annunci_ps5.txt"
     }
 ]
 
@@ -62,7 +70,7 @@ def invia_notifica_whatsapp(messaggio):
     url = f"https://api.callmebot.com/whatsapp.php?phone={WHATSAPP_PHONE}&text={messaggio_codificato}&apikey={WHATSAPP_APIKEY}"
     
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get(url, timeout=20)
         if response.status_code == 200:
             print("Richiesta di notifica WhatsApp inviata con successo!")
         else:
@@ -93,7 +101,6 @@ def esegui_ricerca(config_ricerca):
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
-        # Questa funzione previene il rilevamento da parte di siti come Subito.it
         stealth(driver, languages=["it-IT", "it"], vendor="Google Inc.", platform="Win32")
         
         print(f"Navigazione verso: {config_ricerca['url']}")
@@ -127,8 +134,7 @@ def esegui_ricerca(config_ricerca):
             prezzo_str = prezzo_tag.text.strip() if prezzo_tag else "N/D"
             prezzo_val = estrai_prezzo(prezzo_str)
 
-            # Filtri dinamici basati sulla configurazione
-            if (not all(kw in titolo for kw in config_ricerca['keyword_da_includere'])) or \
+            if (not any(kw in titolo for kw in config_ricerca['keyword_da_includere'])) or \
                (any(kw in titolo for kw in config_ricerca['keyword_da_escludere'])) or \
                (prezzo_val is not None and prezzo_val > config_ricerca['budget_massimo']) or \
                ('venduto' in prezzo_str.lower()):
@@ -151,12 +157,14 @@ if __name__ == "__main__":
     print("Avvio ricerca automatica multicanale...")
     print("========================================")
     
+    nuovi_annunci_per_categoria = {}
     errori_verificati = []
+
     for ricerca_config in CONFIGURAZIONE_RICERCHE:
+        nome_ricerca = ricerca_config["nome_ricerca"]
+        file_cronologia = ricerca_config["file_cronologia"]
+        
         try:
-            nome_ricerca = ricerca_config["nome_ricerca"]
-            file_cronologia = ricerca_config["file_cronologia"]
-            
             link_precedenti = carica_link_precedenti(file_cronologia)
             print(f"[{nome_ricerca}] Trovati {len(link_precedenti)} link nella cronologia.")
             
@@ -166,32 +174,45 @@ if __name__ == "__main__":
                 link_attuali = set(ann['link'] for ann in annunci_attuali)
                 link_nuovi = link_attuali - link_precedenti
                 
-                if not link_nuovi:
-                    print(f"[{nome_ricerca}] Nessun nuovo annuncio trovato.")
-                else:
+                if link_nuovi:
                     print(f"[{nome_ricerca}] Trovati {len(link_nuovi)} nuovi annunci!")
-                    messaggio = f"🎮 Trovati {len(link_nuovi)} nuovi annunci per {nome_ricerca}! 🎉\n\n"
-                    for annuncio in annunci_attuali:
-                        if annuncio['link'] in link_nuovi:
-                            messaggio += f"🆕 {annuncio['titolo']}\n"
-                            messaggio += f"   Prezzo: {annuncio['prezzo']}\n"
-                            messaggio += f"   Link: {annuncio['link']}\n\n"
-                    
-                    invia_notifica_whatsapp(messaggio)
+                    nuovi_annunci_per_categoria[nome_ricerca] = [
+                        ann for ann in annunci_attuali if ann['link'] in link_nuovi
+                    ]
+                else:
+                    print(f"[{nome_ricerca}] Nessun nuovo annuncio trovato.")
                 
                 salva_link_attuali(file_cronologia, link_attuali)
             
             print(f"[{nome_ricerca}] Ricerca completata con successo.")
 
         except Exception as e:
-            nome_ricerca_errore = ricerca_config.get('nome_ricerca', 'N/D')
             tipo_errore = type(e).__name__
-            print(f"!!! ERRORE durante la ricerca per '{nome_ricerca_errore}': {tipo_errore} !!!")
-            errori_verificati.append(f"'{nome_ricerca_errore}': {tipo_errore}")
-            # Continua con la prossima ricerca anche se una fallisce
+            print(f"!!! ERRORE durante la ricerca per '{nome_ricerca}': {tipo_errore} !!!")
+            errori_verificati.append(f"'{nome_ricerca}': {tipo_errore}")
             continue
     
-    # Invia un unico report degli errori alla fine, se ce ne sono stati
+    # --- FORMATTAZIONE E INVIO NOTIFICA UNICA ---
+    if nuovi_annunci_per_categoria:
+        messaggio_finale = "📢 *Nuove offerte trovate!*\n\n"
+        
+        ordine_categorie = {
+            "PSP": "👾 *Sezione PSP*",
+            "Switch OLED": "🎮 *Sezione Switch OLED*",
+            "PlayStation 5": "💿 *Sezione PlayStation 5*"
+        }
+
+        for categoria, titolo_sezione in ordine_categorie.items():
+            if categoria in nuovi_annunci_per_categoria:
+                messaggio_finale += f"{titolo_sezione}\n"
+                for annuncio in nuovi_annunci_per_categoria[categoria]:
+                    messaggio_finale += f"� {annuncio['titolo']}\n"
+                    messaggio_finale += f"   Prezzo: {annuncio['prezzo']}\n"
+                    messaggio_finale += f"   Link: {annuncio['link']}\n\n"
+        
+        invia_notifica_whatsapp(messaggio_finale)
+        print("Notifica aggregata inviata con successo!")
+
     if errori_verificati:
         messaggio_errore = f"🤖 Ciao Alessandro, alcune ricerche sono fallite. 😵\n\nDettagli errori:\n" + "\n".join(errori_verificati)
         invia_notifica_whatsapp(messaggio_errore)
@@ -199,3 +220,4 @@ if __name__ == "__main__":
     print("\n========================================")
     print("Tutte le ricerche sono state completate.")
     print("========================================")
+�
