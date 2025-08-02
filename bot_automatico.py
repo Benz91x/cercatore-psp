@@ -10,6 +10,7 @@ import os
 import re
 import requests
 import urllib.parse
+from selenium_stealth import stealth
 
 # --- CONFIGURAZIONE RICERCHE ---
 # Aggiungi o modifica i dizionari in questa lista per gestire più ricerche.
@@ -91,6 +92,8 @@ def esegui_ricerca(config_ricerca):
     try:
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Questa funzione previene il rilevamento da parte di siti come Subito.it
         stealth(driver, languages=["it-IT", "it"], vendor="Google Inc.", platform="Win32")
         
         print(f"Navigazione verso: {config_ricerca['url']}")
@@ -148,6 +151,7 @@ if __name__ == "__main__":
     print("Avvio ricerca automatica multicanale...")
     print("========================================")
     
+    errori_verificati = []
     for ricerca_config in CONFIGURAZIONE_RICERCHE:
         try:
             nome_ricerca = ricerca_config["nome_ricerca"]
@@ -166,7 +170,6 @@ if __name__ == "__main__":
                     print(f"[{nome_ricerca}] Nessun nuovo annuncio trovato.")
                 else:
                     print(f"[{nome_ricerca}] Trovati {len(link_nuovi)} nuovi annunci!")
-                    # Messaggio personalizzato per ogni ricerca
                     messaggio = f"🎮 Trovati {len(link_nuovi)} nuovi annunci per {nome_ricerca}! 🎉\n\n"
                     for annuncio in annunci_attuali:
                         if annuncio['link'] in link_nuovi:
@@ -181,12 +184,18 @@ if __name__ == "__main__":
             print(f"[{nome_ricerca}] Ricerca completata con successo.")
 
         except Exception as e:
-            messaggio_errore = f"🤖 Ciao Alessandro, la ricerca per '{ricerca_config.get('nome_ricerca', 'N/D')}' è fallita. 😵\n\nErrore: {type(e).__name__}"
-            print(messaggio_errore)
-            invia_notifica_whatsapp(messaggio_errore)
+            nome_ricerca_errore = ricerca_config.get('nome_ricerca', 'N/D')
+            tipo_errore = type(e).__name__
+            print(f"!!! ERRORE durante la ricerca per '{nome_ricerca_errore}': {tipo_errore} !!!")
+            errori_verificati.append(f"'{nome_ricerca_errore}': {tipo_errore}")
             # Continua con la prossima ricerca anche se una fallisce
             continue
     
+    # Invia un unico report degli errori alla fine, se ce ne sono stati
+    if errori_verificati:
+        messaggio_errore = f"🤖 Ciao Alessandro, alcune ricerche sono fallite. 😵\n\nDettagli errori:\n" + "\n".join(errori_verificati)
+        invia_notifica_whatsapp(messaggio_errore)
+
     print("\n========================================")
     print("Tutte le ricerche sono state completate.")
     print("========================================")
