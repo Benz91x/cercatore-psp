@@ -9,21 +9,34 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 import os
 import re
 import requests
-from selenium_stealth import stealth
 import urllib.parse
 
-# --- IMPOSTAZIONI DI RICERCA "SMART" ---
-LINK = "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
-BUDGET_MASSIMO = 100
-KEYWORD_DA_INCLUDERE = ['psp']
-KEYWORD_DA_ESCLUDERE = ['solo giochi', 'solo gioco', 'solo custodia', 'riparazione', 'cerco']
-NOME_FILE_ANNUNCI = "report_annunci_psp.txt"
+# --- CONFIGURAZIONE RICERCHE ---
+# Aggiungi o modifica i dizionari in questa lista per gestire più ricerche.
+CONFIGURAZIONE_RICERCHE = [
+    {
+        "nome_ricerca": "PSP",
+        "url": "https://www.subito.it/annunci-italia/vendita/usato/?q=psp",
+        "budget_massimo": 50,
+        "keyword_da_includere": ['psp'],
+        "keyword_da_escludere": ['solo giochi', 'solo gioco', 'solo custodia', 'riparazione', 'cerco'],
+        "file_cronologia": "report_annunci_psp.txt"
+    },
+    {
+        "nome_ricerca": "Switch OLED",
+        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled&shp=true",
+        "budget_massimo": 150,
+        "keyword_da_includere": ['switch', 'oled'],
+        "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante'],
+        "file_cronologia": "report_annunci_switch.txt"
+    }
+]
 
 # --- RECUPERO DEI SEGRETI DI GITHUB PER WHATSAPP ---
 WHATSAPP_PHONE = os.environ.get("WHATSAPP_PHONE")
 WHATSAPP_APIKEY = os.environ.get("WHATSAPP_APIKEY")
 
-# --- FUNZIONI PER GESTIRE IL FILE LOCALE E WHATSAPP ---
+# --- FUNZIONI DI SUPPORTO ---
 
 def carica_link_precedenti(nome_file):
     """Carica i link degli annunci già processati da un file di testo."""
@@ -39,29 +52,20 @@ def salva_link_attuali(nome_file, link_set):
             f.write(link + '\n')
 
 def invia_notifica_whatsapp(messaggio):
-    """
-    Invia una notifica a WhatsApp tramite l'API di CallMeBot.
-    """
+    """Invia una notifica a WhatsApp tramite l'API di CallMeBot."""
     if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
-        print("ERRORE: Numero di telefono o API Key di WhatsApp non trovati nei segreti di GitHub.")
+        print("ERRORE: Credenziali WhatsApp non trovate nei segreti di GitHub.")
         return
 
-    # L'API di CallMeBot richiede che il messaggio sia codificato per l'URL
     messaggio_codificato = urllib.parse.quote_plus(messaggio)
     url = f"https://api.callmebot.com/whatsapp.php?phone={WHATSAPP_PHONE}&text={messaggio_codificato}&apikey={WHATSAPP_APIKEY}"
     
     try:
-        # È una richiesta GET, non POST
         response = requests.get(url, timeout=15)
-        
         if response.status_code == 200:
             print("Richiesta di notifica WhatsApp inviata con successo!")
-            print("Controlla il tuo telefono per il messaggio.")
         else:
-            print(f"Errore nell'invio della notifica WhatsApp.")
-            print(f"Status Code: {response.status_code}")
-            print(f"Risposta API: {response.text}")
-            
+            print(f"Errore invio notifica WhatsApp. Status: {response.status_code}, Risposta: {response.text}")
     except requests.exceptions.RequestException as e:
         print(f"ERRORE: Eccezione durante la richiesta a CallMeBot: {e}")
 
@@ -73,35 +77,24 @@ def estrai_prezzo(testo_prezzo):
 
 # --- FUNZIONE PRINCIPALE DI SCRAPING ---
 
-def esegui_ricerca():
-    """Esegue lo scraping del sito Subito.it per trovare nuovi annunci."""
-    print("Avvio del browser per lo scraping...")
+def esegui_ricerca(config_ricerca):
+    """Esegue lo scraping del sito Subito.it per una specifica ricerca."""
+    print(f"\n--- Avvio scraping per: {config_ricerca['nome_ricerca']} ---")
+    
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument('--ignore-certificate-errors')
-    chrome_options.add_argument('--allow-running-insecure-content')
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
     
     driver = None
     try:
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
-
-        stealth(driver,
-                languages=["it-IT", "it"],
-                vendor="Google Inc.",
-                platform="Win32",
-                webgl_vendor="Intel Inc.",
-                renderer="Intel Iris OpenGL Engine",
-                fix_hairline=True,
-                )
+        stealth(driver, languages=["it-IT", "it"], vendor="Google Inc.", platform="Win32")
         
-        print(f"Navigazione verso: {LINK}")
-        driver.get(LINK)
+        print(f"Navigazione verso: {config_ricerca['url']}")
+        driver.get(config_ricerca['url'])
 
         try:
             WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accetta')]"))).click()
@@ -113,7 +106,6 @@ def esegui_ricerca():
         driver.execute_script("window.scrollTo(0, 1000);")
         time.sleep(2)
 
-        print("In attesa che gli annunci vengano caricati...")
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="SmallCard-module_card__"]')))
         print("Annunci caricati.")
         
@@ -132,9 +124,10 @@ def esegui_ricerca():
             prezzo_str = prezzo_tag.text.strip() if prezzo_tag else "N/D"
             prezzo_val = estrai_prezzo(prezzo_str)
 
-            if (not any(kw in titolo for kw in KEYWORD_DA_INCLUDERE)) or \
-               (any(kw in titolo for kw in KEYWORD_DA_ESCLUDERE)) or \
-               (prezzo_val is not None and prezzo_val > BUDGET_MASSIMO) or \
+            # Filtri dinamici basati sulla configurazione
+            if (not all(kw in titolo for kw in config_ricerca['keyword_da_includere'])) or \
+               (any(kw in titolo for kw in config_ricerca['keyword_da_escludere'])) or \
+               (prezzo_val is not None and prezzo_val > config_ricerca['budget_massimo']) or \
                ('venduto' in prezzo_str.lower()):
                 continue
             
@@ -144,52 +137,56 @@ def esegui_ricerca():
         
         return annunci_filtrati
     
-    except (TimeoutException, WebDriverException) as e:
-        print(f"!!! ERRORE: {type(e).__name__} durante l'esecuzione di Selenium.")
-        print("Salvataggio screenshot per debug...")
-        if driver:
-            driver.save_screenshot('debug_screenshot.png')
-            print("Screenshot salvato come 'debug_screenshot.png'.")
-        raise e
-
     finally:
         if driver:
             driver.quit()
-            print("Browser chiuso.")
+            print(f"--- Browser chiuso per: {config_ricerca['nome_ricerca']} ---")
 
 # --- SCRIPT PRINCIPALE ---
 if __name__ == "__main__":
-    print("Avvio ricerca automatica...")
-    link_precedenti = carica_link_precedenti(NOME_FILE_ANNUNCI)
-    print(f"Trovati {len(link_precedenti)} link nella cronologia.")
+    print("========================================")
+    print("Avvio ricerca automatica multicanale...")
+    print("========================================")
     
-    try:
-        annunci_attuali = esegui_ricerca()
-        
-        if annunci_attuali is not None:
-            link_attuali = set(ann['link'] for ann in annunci_attuali)
-            link_nuovi = link_attuali - link_precedenti
+    for ricerca_config in CONFIGURAZIONE_RICERCHE:
+        try:
+            nome_ricerca = ricerca_config["nome_ricerca"]
+            file_cronologia = ricerca_config["file_cronologia"]
             
-            if not link_nuovi:
-                print("Nessun nuovo annuncio trovato.")
-            else:
-                print(f"Trovati {len(link_nuovi)} nuovi annunci!")
-                # Messaggio formattato per WhatsApp (senza Markdown)
-                messaggio = f"🎮 Trovati {len(link_nuovi)} nuovi annunci per la tua PSP! 🎉\n\n"
-                for annuncio in annunci_attuali:
-                    if annuncio['link'] in link_nuovi:
-                        messaggio += f"🆕 {annuncio['titolo']}\n"
-                        messaggio += f"   Prezzo: {annuncio['prezzo']}\n"
-                        messaggio += f"   Link: {annuncio['link']}\n\n"
+            link_precedenti = carica_link_precedenti(file_cronologia)
+            print(f"[{nome_ricerca}] Trovati {len(link_precedenti)} link nella cronologia.")
+            
+            annunci_attuali = esegui_ricerca(ricerca_config)
+            
+            if annunci_attuali is not None:
+                link_attuali = set(ann['link'] for ann in annunci_attuali)
+                link_nuovi = link_attuali - link_precedenti
                 
-                invia_notifica_whatsapp(messaggio)
+                if not link_nuovi:
+                    print(f"[{nome_ricerca}] Nessun nuovo annuncio trovato.")
+                else:
+                    print(f"[{nome_ricerca}] Trovati {len(link_nuovi)} nuovi annunci!")
+                    # Messaggio personalizzato per ogni ricerca
+                    messaggio = f"🎮 Trovati {len(link_nuovi)} nuovi annunci per {nome_ricerca}! 🎉\n\n"
+                    for annuncio in annunci_attuali:
+                        if annuncio['link'] in link_nuovi:
+                            messaggio += f"🆕 {annuncio['titolo']}\n"
+                            messaggio += f"   Prezzo: {annuncio['prezzo']}\n"
+                            messaggio += f"   Link: {annuncio['link']}\n\n"
+                    
+                    invia_notifica_whatsapp(messaggio)
+                
+                salva_link_attuali(file_cronologia, link_attuali)
             
-            salva_link_attuali(NOME_FILE_ANNUNCI, link_attuali)
-        
-        print("Ricerca completata con successo.")
+            print(f"[{nome_ricerca}] Ricerca completata con successo.")
 
-    except Exception as e:
-        print(f"Il workflow è fallito a causa di un errore: {e}")
-        messaggio_errore = f"🤖 Ciao Alessandro, la ricerca automatica è fallita. 😵\n\nErrore: {type(e).__name__}\n\nControlla i log su GitHub per i dettagli."
-        invia_notifica_whatsapp(messaggio_errore)
-        raise e
+        except Exception as e:
+            messaggio_errore = f"🤖 Ciao Alessandro, la ricerca per '{ricerca_config.get('nome_ricerca', 'N/D')}' è fallita. 😵\n\nErrore: {type(e).__name__}"
+            print(messaggio_errore)
+            invia_notifica_whatsapp(messaggio_errore)
+            # Continua con la prossima ricerca anche se una fallisce
+            continue
+    
+    print("\n========================================")
+    print("Tutte le ricerche sono state completate.")
+    print("========================================")
