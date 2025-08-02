@@ -58,13 +58,14 @@ jobs:
           name: debug-screenshot
           path: debug_screenshot.png
 
-      # 7. Salva il file di report aggiornato nel repository
+      # 7. Salva TUTTI i file di report aggiornati nel repository
       - name: Commit and push if changed
         if: success()
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add report_annunci_psp.txt
-          # Esegue il commit solo se il file è cambiato
+          # Aggiunge tutti i file di cronologia che potrebbero essere cambiati
+          git add report_annunci_*.txt
+          # Esegue il commit solo se ci sono file cambiati
           git diff --staged --quiet || git commit -m "Aggiorna cronologia annunci"
           git push
