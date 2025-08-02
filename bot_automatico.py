@@ -206,7 +206,7 @@ if __name__ == "__main__":
             if categoria in nuovi_annunci_per_categoria:
                 messaggio_finale += f"{titolo_sezione}\n"
                 for annuncio in nuovi_annunci_per_categoria[categoria]:
-                    messaggio_finale += f"� {annuncio['titolo']}\n"
+                    messaggio_finale += f"🆕 {annuncio['titolo']}\n"
                     messaggio_finale += f"   Prezzo: {annuncio['prezzo']}\n"
                     messaggio_finale += f"   Link: {annuncio['link']}\n\n"
         
@@ -220,4 +220,3 @@ if __name__ == "__main__":
     print("\n========================================")
     print("Tutte le ricerche sono state completate.")
     print("========================================")
-�
