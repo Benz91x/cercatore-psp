@@ -38,6 +38,14 @@ CONFIGURAZIONE_RICERCHE = [
         "keyword_da_includere": ['ps5', 'playstation 5', 'playstation5'],
         "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante', 'controller', 'solo pad', 'cover', 'base'],
         "file_cronologia": "report_annunci_ps5.txt"
+    },
+    {
+        "nome_ricerca": "Nintendo 3DS",
+        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=3ds&shp=true",
+        "budget_massimo": 150,
+        "keyword_da_includere": ['3ds'],
+        "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante', 'solo giochi', 'custodia'],
+        "file_cronologia": "report_annunci_3ds.txt"
     }
 ]
 
@@ -199,6 +207,7 @@ if __name__ == "__main__":
         ordine_categorie = {
             "PSP": "👾 *Sezione PSP*",
             "Switch OLED": "🎮 *Sezione Switch OLED*",
+            "Nintendo 3DS": "🕹️ *Sezione Nintendo 3DS*",
             "PlayStation 5": "💿 *Sezione PlayStation 5*"
         }
 
