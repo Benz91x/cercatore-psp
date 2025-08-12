@@ -11,6 +11,7 @@ import os
 import re
 import requests
 import json
+from selenium_stealth import stealth # <-- Importazione di Stealth
 
 # --- CONFIGURAZIONE RICERCHE ---
 CONFIGURAZIONE_RICERCHE = [
@@ -67,9 +68,7 @@ def estrai_prezzo(testo_prezzo):
 
 
 def get_chat_id_from_updates(token, timeout=10):
-    """Prova a leggere gli aggiornamenti del bot per ottenere un chat_id.
-    Funziona se hai già inviato /start al bot dal tuo account Telegram.
-    """
+    """Prova a leggere gli aggiornamenti del bot per ottenere un chat_id."""
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates"
         r = requests.get(url, timeout=timeout)
@@ -78,13 +77,10 @@ def get_chat_id_from_updates(token, timeout=10):
             return None
         data = r.json()
         for item in data.get('result', []):
-            # controlliamo sia `message` che `channel_post`
             msg = item.get('message') or item.get('channel_post')
-            if not msg:
-                continue
+            if not msg: continue
             chat = msg.get('chat')
-            if not chat:
-                continue
+            if not chat: continue
             chat_id = chat.get('id')
             if chat_id:
                 print(f"Trovato chat_id: {chat_id}")
@@ -95,29 +91,23 @@ def get_chat_id_from_updates(token, timeout=10):
 
 
 def invia_notifica_telegram(messaggio):
-    """Invia messaggio testuale via Telegram Bot API.
-    Assicurati che TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID siano impostati.
-    """
+    """Invia messaggio testuale via Telegram Bot API."""
     token = TELEGRAM_BOT_TOKEN
     chat_id = TELEGRAM_CHAT_ID
 
     if not token:
-        print("ERRORE: TELEGRAM_BOT_TOKEN non impostato. Crea il bot con BotFather e imposta il token come variabile d'ambiente.")
+        print("ERRORE: TELEGRAM_BOT_TOKEN non impostato.")
         return
 
     if not chat_id:
-        print("ATTENZIONE: TELEGRAM_CHAT_ID non impostato. Provo a recuperarne uno tramite getUpdates...")
+        print("ATTENZIONE: TELEGRAM_CHAT_ID non impostato. Provo a recuperarlo...")
         chat_id = get_chat_id_from_updates(token)
         if not chat_id:
-            print("Non sono riuscito a determinare il chat_id. Imposta manualmente TELEGRAM_CHAT_ID dopo aver inviato /start al bot.")
+            print("Non sono riuscito a determinare il chat_id.")
             return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        'chat_id': chat_id,
-        'text': messaggio,
-        # 'parse_mode': 'HTML'  # opzionale
-    }
+    payload = {'chat_id': chat_id, 'text': messaggio}
     try:
         r = requests.post(url, data=payload, timeout=20)
         if r.status_code == 200:
@@ -128,7 +118,7 @@ def invia_notifica_telegram(messaggio):
         print(f"Eccezione durante invio Telegram: {e}")
 
 
-# --- FUNZIONI DI SCRAPING (simili al tuo script originale) ---
+# --- FUNZIONE DI SCRAPING MODIFICATA ---
 
 def esegui_ricerca(config_ricerca):
     print(f"\n--- Avvio scraping per: {config_ricerca['nome_ricerca']} ---")
@@ -137,17 +127,34 @@ def esegui_ricerca(config_ricerca):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-
+    # Aggiungiamo un User-Agent realistico per sembrare un vero browser
+    chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+    
     driver = None
     try:
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
+
+        # --- MODIFICA CHIAVE: Applichiamo STEALTH ---
+        stealth(driver,
+            languages=["it-IT", "it"],
+            vendor="Google Inc.",
+            platform="Win32",
+            webgl_vendor="Intel Inc.",
+            renderer="Intel Iris OpenGL Engine",
+            fix_hairline=True,
+        )
+        # -------------------------------------------
+
         driver.get(config_ricerca['url'])
 
         try:
-            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accetta')]"))).click()
+            # Aumentiamo leggermente il tempo di attesa per il banner dei cookie
+            WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accetta')]"))).click()
             time.sleep(1)
         except TimeoutException:
+            # Se il banner non appare, non è un problema, andiamo avanti
+            print("Banner cookie non trovato o già accettato.")
             pass
 
         driver.execute_script("window.scrollTo(0, 1000);")
@@ -180,11 +187,19 @@ def esegui_ricerca(config_ricerca):
 
         return annunci_filtrati
 
+    except Exception as e:
+        if driver:
+            # In caso di errore, proviamo a salvare uno screenshot per il debug
+            screenshot_path = 'errore_screenshot.png'
+            driver.save_screenshot(screenshot_path)
+            print(f"Screenshot dell'errore salvato in '{screenshot_path}'")
+        # Rilanciamo l'eccezione per farla gestire dal blocco principale
+        raise e
+        
     finally:
         if driver:
             driver.quit()
             print(f"--- Browser chiuso per: {config_ricerca['nome_ricerca']} ---")
-
 
 # --- SCRIPT PRINCIPALE ---
 if __name__ == '__main__':
