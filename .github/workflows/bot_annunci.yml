@@ -2,7 +2,7 @@ name: Bot Annunci Telegram
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/2 * * * *'
   workflow_dispatch:
 
 jobs:
