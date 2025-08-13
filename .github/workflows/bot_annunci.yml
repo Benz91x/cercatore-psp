@@ -10,34 +10,37 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
+    # --- INIZIO MODIFICA FONDAMENTALE ---
+    # Aggiungiamo questa sezione per dare allo script i permessi
+    # necessari per scrivere i file di cronologia nel repository.
+    permissions:
+      contents: write
+    # --- FINE MODIFICA FONDAMENTALE ---
+
     steps:
       # 1. Scarica il codice dal tuo repository
-      # Aggiornato alla versione v4 per le ultime funzionalità
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # 2. Imposta l'ambiente Python
-      # Aggiornato alla versione v5
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 3. Installa le librerie necessarie dal tuo file requirements.txt
+      # 3. Installa le librerie necessarie
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       # 4. Esegue il tuo script Python
-      # Le variabili d'ambiente le imposti nei "Secrets" del tuo repository GitHub
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot_automatico_telegram.py
-
-      # --- INIZIO MODIFICHE FONDAMENTALI ---
 
       # 5. Configura Git per poter salvare le modifiche
       - name: Configure Git
@@ -49,17 +52,13 @@ jobs:
       - name: Check for file changes
         id: git_status
         run: |
-          # Se git status --porcelain trova delle modifiche, il comando wc -l conterà
-          # un numero > 0. Questo valore viene salvato in una variabile 'changes'.
           echo "changes=$(git status --porcelain report_annunci_*.txt | wc -l)" >> $GITHUB_OUTPUT
 
       # 7. Se ci sono modifiche, le salva e le carica sul repository
       - name: Commit and Push if changes
-        # Esegue questo passo SOLO SE il passo precedente ha trovato delle modifiche
         if: steps.git_status.outputs.changes > '0'
         run: |
           echo "File di cronologia modificati. Avvio commit e push..."
-          # Aggiunge solo i file di cronologia per evitare di salvare altri file temporanei
           git add report_annunci_*.txt
           git commit -m "Aggiornamento cronologia annunci"
           git push
@@ -68,6 +67,4 @@ jobs:
       - name: No changes message
         if: steps.git_status.outputs.changes == '0'
         run: echo "Nessuna modifica nei file di cronologia. Nessun commit necessario."
-
-      # --- FINE MODIFICHE FONDAMENTALI ---
 
