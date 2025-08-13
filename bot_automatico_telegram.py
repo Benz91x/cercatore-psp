@@ -13,7 +13,6 @@ import requests
 from selenium_stealth import stealth
 
 # --- CONFIGURAZIONE RICERCHE ---
-# Nessuna modifica qui, la struttura è ottima.
 CONFIGURAZIONE_RICERCHE = [
     {
         "nome_ricerca": "PSP",
@@ -45,7 +44,7 @@ CONFIGURAZIONE_RICERCHE = [
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-# --- FUNZIONI UTILI ( invariate ) ---
+# --- FUNZIONI UTILI ---
 
 def carica_link_precedenti(nome_file):
     """Carica i link da un file di cronologia in un set per un confronto rapido."""
@@ -73,7 +72,6 @@ def estrai_prezzo(testo_prezzo):
     """Estrae il valore numerico del prezzo da una stringa."""
     if not testo_prezzo:
         return None
-    # Trova tutti i numeri (anche con punto o virgola come separatore decimale)
     numeri = re.findall(r'\d+[.,]?\d*', testo_prezzo.replace(',', '.'))
     return float(numeri[0]) if numeri else None
 
@@ -84,10 +82,8 @@ def get_chat_id_from_updates(token, timeout=10):
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     try:
         response = requests.get(url, timeout=timeout)
-        response.raise_for_status()  # Lancia un'eccezione per errori HTTP (4xx o 5xx)
+        response.raise_for_status()
         data = response.json()
-        
-        # Itera a ritroso per trovare l'ultimo messaggio valido
         for item in reversed(data.get('result', [])):
             msg = item.get('message') or item.get('channel_post')
             if msg and 'chat' in msg and 'id' in msg['chat']:
@@ -96,7 +92,6 @@ def get_chat_id_from_updates(token, timeout=10):
                 return chat_id
     except requests.exceptions.RequestException as e:
         print(f"Errore durante la chiamata a getUpdates: {e}")
-    
     print("Non sono riuscito a determinare il chat_id. Assicurati di aver inviato almeno un messaggio al bot.")
     return None
 
@@ -113,10 +108,10 @@ def invia_notifica_telegram(messaggio):
     if not chat_id:
         chat_id = get_chat_id_from_updates(token)
         if not chat_id:
-            return # Messaggio di errore già stampato da get_chat_id_from_updates
+            return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {'chat_id': chat_id, 'text': messaggio, 'parse_mode': 'HTML'}
+    payload = {'chat_id': chat_id, 'text': messaggio, 'parse_mode': 'HTML', 'disable_web_page_preview': True}
     try:
         r = requests.post(url, data=payload, timeout=20)
         r.raise_for_status()
@@ -125,34 +120,20 @@ def invia_notifica_telegram(messaggio):
         print(f"Errore durante l'invio della notifica Telegram: {e}")
 
 
-# --- FUNZIONE DI SCRAPING OTTIMIZZATA ---
+# --- FUNZIONE DI SCRAPING OTTIMIZZATA E CORRETTA ---
 
 def esegui_ricerca(driver, config_ricerca):
-    """
-    Esegue una singola ricerca utilizzando un'istanza del driver già attiva.
-    
-    Args:
-        driver: L'istanza di webdriver.Chrome da utilizzare.
-        config_ricerca (dict): Il dizionario di configurazione per la ricerca.
-
-    Returns:
-        list: Una lista di dizionari, ognuno rappresentante un annuncio filtrato.
-              Restituisce una lista vuota in caso di errore.
-    """
+    """Esegue una singola ricerca utilizzando un'istanza del driver già attiva."""
     print(f"\n--- Avvio scraping per: {config_ricerca['nome_ricerca']} ---")
     try:
         driver.get(config_ricerca['url'])
-
-        # Attesa esplicita per il caricamento degli annunci
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="SmallCard-module_card__"]'))
         )
-        # Scroll per caricare eventuali altri annunci (lazy loading)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1) # Breve attesa per il rendering post-scroll
+        time.sleep(1)
 
         soup = bs4.BeautifulSoup(driver.page_source, 'html.parser')
-        # Selettore più specifico per le card degli annunci
         ad_cards = soup.select('a[class*="SmallCard-module_link__"]')
 
         if not ad_cards:
@@ -160,30 +141,31 @@ def esegui_ricerca(driver, config_ricerca):
             return []
 
         annunci_filtrati = []
-        link_visti = set() # Per evitare duplicati nella stessa pagina
+        link_visti = set()
 
         for card in ad_cards:
             titolo_tag = card.find('h2')
             prezzo_tag = card.find('p', class_=lambda x: x and 'price' in x.lower())
             
-            if not titolo_tag:
-                continue
+            if not titolo_tag: continue
             
             link = card.get('href')
-            if not link or link in link_visti:
-                continue
+            if not link or link in link_visti: continue
             link_visti.add(link)
 
             titolo = titolo_tag.text.strip().lower()
             prezzo_str = prezzo_tag.text.strip() if prezzo_tag else 'N/D'
             prezzo_val = estrai_prezzo(prezzo_str)
 
-            # Logica di filtraggio migliorata per leggibilità
-            titolo_contiene_keyword_da_escludere = any(kw in titolo for kw in config_ricerca['keyword_da_escludere'])
-            titolo_non_contiene_keyword_da_includere = not any(kw in titolo for kw in config_ricerca['keyword_da_includere'])
-            prezzo_fuori_budget = prezzo_val is not None and prezzo_val > config_ricerca['budget_massimo']
-            
-            if titolo_contiene_keyword_da_escludere or titolo_non_contiene_keyword_da_includere or prezzo_fuori_budget:
+            # --- LOGICA DI FILTRAGGIO CORRETTA E PIÙ CHIARA ---
+            # Controlla tutte le condizioni per scartare un annuncio
+            if 'venduto' in prezzo_str.lower():
+                continue # CORREZIONE: Scarta se il prezzo contiene "venduto"
+            if any(kw in titolo for kw in config_ricerca['keyword_da_escludere']):
+                continue
+            if not any(kw in titolo for kw in config_ricerca['keyword_da_includere']):
+                continue
+            if prezzo_val is not None and prezzo_val > config_ricerca['budget_massimo']:
                 continue
 
             annuncio_obj = {
@@ -197,7 +179,7 @@ def esegui_ricerca(driver, config_ricerca):
         return annunci_filtrati
 
     except TimeoutException:
-        print(f"Timeout durante l'attesa degli annunci per '{config_ricerca['nome_ricerca']}'. La pagina potrebbe essere cambiata o vuota.")
+        print(f"Timeout durante l'attesa degli annunci per '{config_ricerca['nome_ricerca']}'.")
         return []
     except Exception as e:
         print(f"Errore imprevisto durante lo scraping di '{config_ricerca['nome_ricerca']}': {e}")
@@ -214,7 +196,6 @@ def esegui_ricerca(driver, config_ricerca):
 if __name__ == '__main__':
     print('Avvio bot per monitoraggio annunci Subito.it...')
     
-    # --- OTTIMIZZAZIONE CHIAVE: Inizializza il browser UNA SOLA VOLTA ---
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
@@ -228,39 +209,27 @@ if __name__ == '__main__':
     try:
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        stealth(driver, languages=["it-IT", "it"], vendor="Google Inc.", platform="Win32", webgl_vendor="Intel Inc.", renderer="Intel Iris OpenGL Engine", fix_hairline=True)
 
-        # Applica le tecniche di stealth per sembrare un utente umano
-        stealth(driver,
-            languages=["it-IT", "it"],
-            vendor="Google Inc.",
-            platform="Win32",
-            webgl_vendor="Intel Inc.",
-            renderer="Intel Iris OpenGL Engine",
-            fix_hairline=True,
-        )
-
-        # Visita la pagina principale per accettare i cookie una sola volta
         print("Accettazione banner cookie (se presente)...")
         driver.get("https://www.subito.it")
         try:
-            # Usa un selettore più robusto per il pulsante Accetta
             WebDriverWait(driver, 15).until(
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Accetta') or contains(., 'ACCEPT')]"))
             ).click()
             print("Banner cookie accettato.")
-            time.sleep(1) # Pausa dopo il click
+            time.sleep(1)
         except TimeoutException:
             print("Banner cookie non trovato o già accettato.")
             
-        # Dizionario per raccogliere tutti i nuovi annunci
         nuovi_annunci_complessivi = {}
         errori = []
 
-        # Ciclo principale delle ricerche
         for cfg in CONFIGURAZIONE_RICERCHE:
+            # --- LOGGING AGGIUNTO ---
             link_precedenti = carica_link_precedenti(cfg['file_cronologia'])
+            print(f"[{cfg['nome_ricerca']}] Caricati {len(link_precedenti)} link dalla cronologia '{cfg['file_cronologia']}'.")
             
-            # Passa il driver attivo alla funzione di ricerca
             annunci_attuali_obj = esegui_ricerca(driver, cfg)
             
             if not annunci_attuali_obj:
@@ -270,28 +239,26 @@ if __name__ == '__main__':
             link_nuovi = link_attuali - link_precedenti
 
             if link_nuovi:
-                # Filtra gli oggetti annuncio per ottenere solo quelli nuovi
                 annunci_da_notificare = [ann for ann in annunci_attuali_obj if ann['link'] in link_nuovi]
                 nuovi_annunci_complessivi[cfg['nome_ricerca']] = annunci_da_notificare
-                print(f"Trovati {len(link_nuovi)} nuovi annunci per '{cfg['nome_ricerca']}'!")
+                print(f"[{cfg['nome_ricerca']}] TROVATI {len(link_nuovi)} NUOVI ANNUNCI!")
 
-            # Aggiorna il file di cronologia con tutti i link attuali
+            # --- LOGGING AGGIUNTO ---
+            print(f"[{cfg['nome_ricerca']}] Aggiornamento cronologia con {len(link_attuali)} link totali...")
             salva_link_attuali(cfg['file_cronologia'], link_attuali)
 
     except Exception as e:
         print(f"ERRORE CRITICO: Si è verificato un problema grave. {e}")
         errori.append(f"Generale: {type(e).__name__}")
     finally:
-        # --- OTTIMIZZAZIONE: Chiudi il browser solo alla fine ---
         if driver:
             driver.quit()
             print("\nBrowser chiuso.")
 
-    # Invia una sola notifica riepilogativa se sono stati trovati nuovi annunci
     if nuovi_annunci_complessivi:
         messaggio = "<b>📢 Nuove offerte trovate!</b>\n\n"
         for categoria, lista_annunci in nuovi_annunci_complessivi.items():
-            messaggio += f"<b>--- {categoria} ---</b>\n"
+            messaggio += f"<b>--- {categoria.upper()} ---</b>\n"
             for annuncio in lista_annunci:
                 messaggio += f"{annuncio['titolo']} — <b>{annuncio['prezzo']}</b>\n<a href='{annuncio['link']}'>Vedi annuncio</a>\n\n"
         invia_notifica_telegram(messaggio)
