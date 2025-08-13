@@ -12,6 +12,14 @@ import re
 import requests
 from selenium_stealth import stealth
 
+# --- OTTIMIZZAZIONE PERCORSO FILE ---
+# Ottiene il percorso assoluto della cartella in cui si trova lo script.
+# Questo garantisce che i file di cronologia vengano sempre trovati,
+# indipendentemente da dove viene eseguito lo script.
+# __file__ si riferisce al file corrente (lo script .py)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 # --- CONFIGURAZIONE RICERCHE ---
 CONFIGURAZIONE_RICERCHE = [
     {
@@ -20,7 +28,8 @@ CONFIGURAZIONE_RICERCHE = [
         "budget_massimo": 50,
         "keyword_da_includere": ['psp'],
         "keyword_da_escludere": ['solo giochi', 'solo gioco', 'solo custodia', 'riparazione', 'cerco'],
-        "file_cronologia": "report_annunci_psp.txt"
+        # CORREZIONE: Usa un percorso assoluto per il file di cronologia
+        "file_cronologia": os.path.join(BASE_DIR, "report_annunci_psp.txt")
     },
     {
         "nome_ricerca": "Switch OLED",
@@ -28,7 +37,8 @@ CONFIGURAZIONE_RICERCHE = [
         "budget_massimo": 150,
         "keyword_da_includere": ['switch', 'oled'],
         "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante'],
-        "file_cronologia": "report_annunci_switch.txt"
+        # CORREZIONE: Usa un percorso assoluto per il file di cronologia
+        "file_cronologia": os.path.join(BASE_DIR, "report_annunci_switch.txt")
     },
     {
         "nome_ricerca": "PlayStation 5",
@@ -36,7 +46,8 @@ CONFIGURAZIONE_RICERCHE = [
         "budget_massimo": 200,
         "keyword_da_includere": ['ps5', 'playstation 5', 'playstation5'],
         "keyword_da_escludere": ['riparazione', 'cerco', 'non funzionante', 'controller', 'solo pad', 'cover', 'base'],
-        "file_cronologia": "report_annunci_ps5.txt"
+        # CORREZIONE: Usa un percorso assoluto per il file di cronologia
+        "file_cronologia": os.path.join(BASE_DIR, "report_annunci_ps5.txt")
     }
 ]
 
@@ -158,9 +169,8 @@ def esegui_ricerca(driver, config_ricerca):
             prezzo_val = estrai_prezzo(prezzo_str)
 
             # --- LOGICA DI FILTRAGGIO CORRETTA E PIÙ CHIARA ---
-            # Controlla tutte le condizioni per scartare un annuncio
             if 'venduto' in prezzo_str.lower():
-                continue # CORREZIONE: Scarta se il prezzo contiene "venduto"
+                continue
             if any(kw in titolo for kw in config_ricerca['keyword_da_escludere']):
                 continue
             if not any(kw in titolo for kw in config_ricerca['keyword_da_includere']):
@@ -226,9 +236,8 @@ if __name__ == '__main__':
         errori = []
 
         for cfg in CONFIGURAZIONE_RICERCHE:
-            # --- LOGGING AGGIUNTO ---
             link_precedenti = carica_link_precedenti(cfg['file_cronologia'])
-            print(f"[{cfg['nome_ricerca']}] Caricati {len(link_precedenti)} link dalla cronologia '{cfg['file_cronologia']}'.")
+            print(f"[{cfg['nome_ricerca']}] Caricati {len(link_precedenti)} link dalla cronologia.")
             
             annunci_attuali_obj = esegui_ricerca(driver, cfg)
             
@@ -243,7 +252,6 @@ if __name__ == '__main__':
                 nuovi_annunci_complessivi[cfg['nome_ricerca']] = annunci_da_notificare
                 print(f"[{cfg['nome_ricerca']}] TROVATI {len(link_nuovi)} NUOVI ANNUNCI!")
 
-            # --- LOGGING AGGIUNTO ---
             print(f"[{cfg['nome_ricerca']}] Aggiornamento cronologia con {len(link_attuali)} link totali...")
             salva_link_attuali(cfg['file_cronologia'], link_attuali)
 
