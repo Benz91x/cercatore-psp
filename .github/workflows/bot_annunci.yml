@@ -2,7 +2,7 @@ name: Bot annunci Subito
 
 on:
   schedule:
-    - cron: "*/30 7-21 * * 1-6" # ogni 30 minuti dalle 7:00 alle 21:59 dal lunedì al sabato
+  - cron: "*/5 * * * *" # ogni 5 minuti (UTC)
   workflow_dispatch: {}
 
 jobs:
