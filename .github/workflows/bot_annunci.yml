@@ -1,31 +1,45 @@
-ricerche:
-- nome_ricerca: "PSP"
-url: "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
-budget_massimo: 50
-keyword_da_includere: ["psp"]
-keyword_da_escludere: ["solo giochi", "solo gioco", "solo custodia", "riparazione", "cerco"]
-file_cronologia: "report_annunci_psp.txt"
+name: Bot annunci Subito
 
 
-- nome_ricerca: "Switch OLED"
-url: "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled&shp=true"
-budget_massimo: 150
-keyword_da_includere: ["switch", "oled"]
-keyword_da_escludere: ["riparazione", "cerco", "non funzionante"]
-file_cronologia: "report_annunci_switch.txt"
+on:
+schedule:
+- cron: "*/30 7-21 * * 1-6" # ogni 30 minuti 07:00-21:59, lun-sab (regola modificabile)
+workflow_dispatch: {}
 
 
-- nome_ricerca: "PlayStation 5"
-url: "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5&shp=true"
-budget_massimo: 200
-keyword_da_includere: ["ps5", "playstation 5", "playstation5"]
-keyword_da_escludere: ["riparazione", "cerco", "non funzionante", "controller", "solo pad", "cover", "base"]
-file_cronologia: "report_annunci_ps5.txt"
+jobs:
+run:
+runs-on: ubuntu-latest
+steps:
+- name: Checkout repo
+uses: actions/checkout@v4
 
 
-- nome_ricerca: "Nintendo 3DS"
-url: "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds&shp=true"
-budget_massimo: 120
-keyword_da_includere: ["3ds", "nintendo 3ds"]
-keyword_da_escludere: ["solo giochi", "solo gioco", "solo custodia", "riparazione", "cerco", "non funzionante"]
-file_cronologia: "report_annunci_3ds.txt"
+- name: Setup Python
+uses: actions/setup-python@v5
+with:
+python-version: "3.11"
+
+
+- name: Install Google Chrome (stable)
+run: |
+sudo apt-get update
+sudo apt-get install -y wget gpg
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt-get update
+sudo apt-get install -y google-chrome-stable
+
+
+- name: Install Python deps
+run: |
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+
+- name: Run bot
+env:
+TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # opzionale
+run: |
+python bot_automatico_telegram.py
