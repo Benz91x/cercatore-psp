@@ -1,45 +1,40 @@
 name: Bot annunci Subito
 
-
 on:
-schedule:
-- cron: "*/30 7-21 * * 1-6" # ogni 30 minuti 07:00-21:59, lun-sab (regola modificabile)
-workflow_dispatch: {}
-
+  schedule:
+    - cron: "*/30 7-21 * * 1-6" # ogni 30 minuti dalle 7:00 alle 21:59 dal lunedì al sabato
+  workflow_dispatch: {}
 
 jobs:
-run:
-runs-on: ubuntu-latest
-steps:
-- name: Checkout repo
-uses: actions/checkout@v4
+  run:
+    runs-on: ubuntu-latest
 
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-- name: Setup Python
-uses: actions/setup-python@v5
-with:
-python-version: "3.11"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
-- name: Install Google Chrome (stable)
-run: |
-sudo apt-get update
-sudo apt-get install -y wget gpg
-wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-sudo apt-get update
-sudo apt-get install -y google-chrome-stable
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-
-- name: Install Python deps
-run: |
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-
-- name: Run bot
-env:
-TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # opzionale
-run: |
-python bot_automatico_telegram.py
+      - name: Run Subito bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bot_automatico_telegram.py
