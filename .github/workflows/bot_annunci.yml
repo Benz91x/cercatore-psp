@@ -1,16 +1,15 @@
-# Opzione A (consigliata): accoda i run ogni 5 minuti, NON cancellare quello in corso
-name: Bot annunci Subito (queue 5min)
+name: Bot annunci Subito (ogni 5 minuti)
 
 
 on:
 schedule:
-- cron: "*/5 * * * *" # ogni 5 minuti (UTC)
+- cron: "*/5 * * * *" # ogni 5 minuti, tutti i giorni (UTC)
 workflow_dispatch: {}
 
 
 concurrency:
 group: subito-bot
-cancel-in-progress: false # <— accoda invece di cancellare
+cancel-in-progress: false # evita che un run venga cancellato da quello successivo
 
 
 jobs:
@@ -30,7 +29,6 @@ with:
 python-version: "3.11"
 
 
-# Setup Chrome via action (più veloce e stabile di apt-get)
 - name: Setup Google Chrome
 uses: browser-actions/setup-chrome@v1
 
