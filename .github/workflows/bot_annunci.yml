@@ -1,70 +1,31 @@
-name: Bot Annunci Telegram
+ricerche:
+- nome_ricerca: "PSP"
+url: "https://www.subito.it/annunci-italia/vendita/usato/?q=psp"
+budget_massimo: 50
+keyword_da_includere: ["psp"]
+keyword_da_escludere: ["solo giochi", "solo gioco", "solo custodia", "riparazione", "cerco"]
+file_cronologia: "report_annunci_psp.txt"
 
-on:
-  schedule:
-    # Esegue lo script ogni 5 minuti.
-    - cron: '*/5 * * * *'
-  # Permette anche di avviare lo script manualmente dalla pagina Actions di GitHub
-  workflow_dispatch:
 
-jobs:
-  run-bot:
-    runs-on: ubuntu-latest
+- nome_ricerca: "Switch OLED"
+url: "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled&shp=true"
+budget_massimo: 150
+keyword_da_includere: ["switch", "oled"]
+keyword_da_escludere: ["riparazione", "cerco", "non funzionante"]
+file_cronologia: "report_annunci_switch.txt"
 
-    # --- INIZIO MODIFICA FONDAMENTALE ---
-    # Aggiungiamo questa sezione per dare allo script i permessi
-    # necessari per scrivere i file di cronologia nel repository.
-    permissions:
-      contents: write
-    # --- FINE MODIFICA FONDAMENTALE ---
 
-    steps:
-      # 1. Scarica il codice dal tuo repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+- nome_ricerca: "PlayStation 5"
+url: "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5&shp=true"
+budget_massimo: 200
+keyword_da_includere: ["ps5", "playstation 5", "playstation5"]
+keyword_da_escludere: ["riparazione", "cerco", "non funzionante", "controller", "solo pad", "cover", "base"]
+file_cronologia: "report_annunci_ps5.txt"
 
-      # 2. Imposta l'ambiente Python
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
 
-      # 3. Installa le librerie necessarie
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # 4. Esegue il tuo script Python
-      - name: Run bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python bot_automatico_telegram.py
-
-      # 5. Configura Git per poter salvare le modifiche
-      - name: Configure Git
-        run: |
-          git config --global user.name 'GitHub Actions Bot'
-          git config --global user.email 'github-actions-bot@github.com'
-
-      # 6. Controlla se i file di cronologia sono stati creati o modificati
-      - name: Check for file changes
-        id: git_status
-        run: |
-          echo "changes=$(git status --porcelain report_annunci_*.txt | wc -l)" >> $GITHUB_OUTPUT
-
-      # 7. Se ci sono modifiche, le salva e le carica sul repository
-      - name: Commit and Push if changes
-        if: steps.git_status.outputs.changes > '0'
-        run: |
-          echo "File di cronologia modificati. Avvio commit e push..."
-          git add report_annunci_*.txt
-          git commit -m "Aggiornamento cronologia annunci"
-          git push
-      
-      # 8. Messaggio se non ci sono modifiche
-      - name: No changes message
-        if: steps.git_status.outputs.changes == '0'
-        run: echo "Nessuna modifica nei file di cronologia. Nessun commit necessario."
-
+- nome_ricerca: "Nintendo 3DS"
+url: "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds&shp=true"
+budget_massimo: 120
+keyword_da_includere: ["3ds", "nintendo 3ds"]
+keyword_da_escludere: ["solo giochi", "solo gioco", "solo custodia", "riparazione", "cerco", "non funzionante"]
+file_cronologia: "report_annunci_3ds.txt"
