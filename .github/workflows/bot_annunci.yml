@@ -1,15 +1,15 @@
-name: Bot annunci Subito (ogni 5 minuti)
+name: Bot annunci Subito
 
 
 on:
 schedule:
-- cron: "*/5 * * * *" # ogni 5 minuti, tutti i giorni (UTC)
+- cron: "*/5 * * * *" # ogni 5 minuti (UTC)
 workflow_dispatch: {}
 
 
 concurrency:
 group: subito-bot
-cancel-in-progress: false # evita che un run venga cancellato da quello successivo
+cancel-in-progress: false # non cancella run in corso (evita "operation was canceled")
 
 
 jobs:
@@ -29,8 +29,14 @@ with:
 python-version: "3.11"
 
 
-- name: Setup Google Chrome
-uses: browser-actions/setup-chrome@v1
+- name: Install Google Chrome (stable)
+run: |
+sudo apt-get update
+sudo apt-get install -y wget gpg
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt-get update
+sudo apt-get install -y google-chrome-stable
 
 
 - name: Install Python dependencies
@@ -48,7 +54,7 @@ python bot_automatico_telegram.py
 
 
 - name: Upload error screenshots
-if: ${{ failure() }}
+if: failure()
 uses: actions/upload-artifact@v4
 with:
 name: errore-screenshots
