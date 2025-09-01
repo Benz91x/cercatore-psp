@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Bot di monitoraggio Subito.it con:
-- Aggiunta ricerca Nintendo 3DS
-- Gestione cookie banner Usercentrics in iframe
-- Selettori resilienti (basati su href / data-testid)
-- Scroll progressivo + attesa lazy-load
-- Headless "new", UA e lingua coerenti
-- Stealth opzionale se disponibile
-- Log più espliciti e screenshot d'errore
+Bot di monitoraggio Subito.it – versione anti-timeout per CI/headless
 
-Configurazione: via YAML (bot_annunci.yml in root) o default embedded.
-Var. ambiente: TELEGRAM_BOT_TOKEN (obbl.), TELEGRAM_CHAT_ID (opzionale)
+Strategie adottate per eliminare i timeout:
+- Attesa su "document.readyState == complete" e parsing iterativo senza dipendere da classi ofuscate
+- Selettori resilienti (href che includono "/annunci/") + fallback multipli per titolo/prezzo
+- Scroll progressivo (lazy-load) con cicli di parsing/valutazione
+- Gestione banner cookie sia in root sia in iframe (Usercentrics)
+- Headless "new", UA e lingua coerenti; disabilitazione flag di automation
+- Screenshot automatici su ogni timeout di categoria
+- Fallback opzionale a undetected-chromedriver (se installato)
+
+Configurazione: YAML opzionale (bot_annunci.yml in root) oppure default embedded.
+Variabili d'ambiente: TELEGRAM_BOT_TOKEN (obbl.), TELEGRAM_CHAT_ID (opz.)
 """
 
 import os
@@ -18,6 +20,8 @@ import re
 import time
 import requests
 import bs4
+from typing import List, Dict
+
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -25,17 +29,19 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchFrameException
 
-# YAML opzionale
+# --- YAML opzionale ---
 try:
-    import yaml
+    import yaml  # pyyaml
 except Exception:
     yaml = None
 
-# Stealth opzionale
+# --- undetected-chromedriver opzionale ---
+_uc = None
 try:
-    from selenium_stealth import stealth
+    import undetected_chromedriver as uc  # type: ignore
+    _uc = uc
 except Exception:
-    stealth = None
+    _uc = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_PATH = os.path.join(BASE_DIR, "bot_annunci.yml")
@@ -78,9 +84,9 @@ DEFAULT_RICERCHE = [
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ----------------- UTILS -----------------
+# ----------------- FS UTILS -----------------
 
-def _ensure_abs_cronofile(entry: dict) -> dict:
+def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
     if not fname:
         safe = re.sub(r"[^a-z0-9]+", "_", entry.get("nome_ricerca", "ricerca").lower())
@@ -90,7 +96,7 @@ def _ensure_abs_cronofile(entry: dict) -> dict:
     entry["file_cronologia"] = fname
     return entry
 
-def carica_configurazione():
+def carica_configurazione() -> List[Dict]:
     if yaml and os.path.exists(YAML_PATH):
         try:
             with open(YAML_PATH, "r", encoding="utf-8") as f:
@@ -98,7 +104,7 @@ def carica_configurazione():
             ricerche = data.get("ricerche")
             if isinstance(ricerche, list) and ricerche:
                 return [_ensure_abs_cronofile(dict(e)) for e in ricerche if isinstance(e, dict)]
-            print("[CFG] YAML trovato ma sezione 'ricerche' mancante/vuota: uso default.")
+            print("[CFG] YAML trovato ma 'ricerche' vuoto: uso default.")
         except Exception as ex:
             print(f"[CFG] Errore parsing YAML: {ex}. Uso default.")
     else:
@@ -108,7 +114,7 @@ def carica_configurazione():
             print("[CFG] YAML non trovato: uso default.")
     return [_ensure_abs_cronofile(dict(e)) for e in DEFAULT_RICERCHE]
 
-def carica_link_precedenti(nome_file: str):
+def carica_link_precedenti(nome_file: str) -> set:
     if not os.path.exists(nome_file):
         return set()
     try:
@@ -118,19 +124,13 @@ def carica_link_precedenti(nome_file: str):
         print(f"[FS] Lettura {nome_file} fallita: {e}")
         return set()
 
-def salva_link_attuali(nome_file: str, link_set):
+def salva_link_attuali(nome_file: str, link_set: set):
     try:
         with open(nome_file, "w", encoding="utf-8") as f:
             for link in sorted(list(link_set)):
                 f.write(link + "\n")
     except Exception as e:
         print(f"[FS] Scrittura {nome_file} fallita: {e}")
-
-def estrai_prezzo(testo: str):
-    if not testo:
-        return None
-    nums = re.findall(r"\d+[.,]?\d*", testo.replace(",", "."))
-    return float(nums[0]) if nums else None
 
 # ----------------- TELEGRAM -----------------
 
@@ -179,14 +179,20 @@ def invia_notifica_telegram(messaggio: str):
 
 # ----------------- SELENIUM HELPERS -----------------
 
+def wait_ready(driver, timeout=20):
+    WebDriverWait(driver, timeout).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
+
+
 def accetta_cookie_se_presente(driver):
     # Tentativo 1: banner principale (fuori iframe)
     try:
-        btn = WebDriverWait(driver, 5).until(
+        btn = WebDriverWait(driver, 4).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Accetta') or contains(., 'ACCEPT') or @data-testid='uc-accept-all-button']"))
         )
         btn.click()
-        time.sleep(0.5)
+        time.sleep(0.4)
         print("[COOKIE] Accettato banner (root)")
         return
     except TimeoutException:
@@ -211,66 +217,69 @@ def accetta_cookie_se_presente(driver):
         driver.switch_to.default_content()
 
 
-def scroll_progressivo(driver, steps=6, pause=1.2):
-    for _ in range(steps):
-        driver.execute_script("window.scrollBy(0, document.body.scrollHeight);")
+def scroll_e_parse(driver, max_loops=8, pause=1.0) -> List[Dict]:
+    """Esegue scroll incrementali e, ad ogni step, parse degli anchor /annunci/.
+    Ritorna una lista di annunci (titolo, prezzo, link)."""
+    all_seen = {}
+    for i in range(max_loops):
+        html = driver.page_source
+        soup = bs4.BeautifulSoup(html, "html.parser")
+        anchors = soup.select('[data-testid="listing-grid"] a[href*="/annunci/"]') or soup.select('a[href*="/annunci/"]')
+        for a in anchors:
+            href = a.get("href")
+            if not href:
+                continue
+            if href not in all_seen:
+                title_el = a.select_one('[data-testid="ad-title"], h2, h3')
+                titolo = (title_el.get_text(strip=True) if title_el else (a.get("aria-label") or a.get("title") or "")).strip() or "(senza titolo)"
+                price_el = a.select_one('[data-testid="ad-price"]')
+                prezzo = price_el.get_text(strip=True) if price_el else "N/D"
+                all_seen[href] = {"link": href, "titolo": titolo, "prezzo": prezzo}
+        # euristica: se abbiamo già un numero decente di card, possiamo fermarci
+        if len(all_seen) >= 20:
+            break
+        driver.execute_script("window.scrollBy(0, Math.max(600, window.innerHeight));")
         time.sleep(pause)
-
-
-def estrai_annunci_da_html(html: str):
-    soup = bs4.BeautifulSoup(html, "html.parser")
-    # selettori resilienti: preferisci listing grid e link /annunci/
-    cards = soup.select('[data-testid="listing-grid"] a[href*="/annunci/"]')
-    if not cards:
-        cards = soup.select('a[href*="/annunci/"]')
-    risultati = []
-    for a in cards:
-        href = a.get("href")
-        if not href:
-            continue
-        titolo = None
-        # prova data-testid o heading
-        titolo_tag = a.select_one('[data-testid="ad-title"], h2, h3')
-        if titolo_tag and hasattr(titolo_tag, 'get_text'):
-            titolo = titolo_tag.get_text(strip=True)
-        prezzo_tag = a.select_one('[data-testid="ad-price"]')
-        prezzo = prezzo_tag.get_text(strip=True) if prezzo_tag else "N/D"
-        risultati.append({"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo})
-    return risultati
+    return list(all_seen.values())
 
 # ----------------- CORE -----------------
 
-def esegui_ricerca(driver, cfg):
+def esegui_ricerca(driver, cfg: Dict) -> List[Dict]:
     nome = cfg['nome_ricerca']
     print(f"\n--- Avvio ricerca: {nome} ---")
     try:
         driver.get(cfg["url"])  # carica pagina lista
+        wait_ready(driver, 25)
         accetta_cookie_se_presente(driver)
 
-        # attesa di una griglia o comunque di link annunci
-        WebDriverWait(driver, 25).until(
-            EC.any_of(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-testid="listing-grid"] a[href*="/annunci/"]')),
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'a[href*="/annunci/"]')),
-            )
-        )
-
-        scroll_progressivo(driver, steps=6, pause=1.1)
-        time.sleep(1.2)  # stabilizzazione
-
-        annunci = estrai_annunci_da_html(driver.page_source)
+        # Primo ciclo di scroll + parse (senza EC aggressivi)
+        annunci = scroll_e_parse(driver, max_loops=10, pause=1.0)
         if not annunci:
-            print(f"[{nome}] Nessuna card estratta (markup cambiato?)")
+            # tenta ulteriore attesa breve e un giro extra
+            time.sleep(2)
+            annunci = scroll_e_parse(driver, max_loops=6, pause=1.1)
+
+        if not annunci:
+            print(f"[{nome}] Nessuna card estratta – salvo screenshot e continuo.")
+            safe = re.sub(r'[^a-z0-9]+', '_', nome.lower())
+            screenshot_path = os.path.join(BASE_DIR, f"errore_{safe}.png")
+            try:
+                driver.save_screenshot(screenshot_path)
+                print(f"[{nome}] Screenshot salvato: {screenshot_path}")
+            except Exception as se:
+                print(f"[{nome}] Impossibile salvare screenshot: {se}")
             return []
 
-        # filtri
+        # Filtri applicati
         link_precedenti = carica_link_precedenti(cfg['file_cronologia'])
         filtrati = []
         for ann in annunci:
             titolo_l = (ann['titolo'] or '').lower()
-            prezzo_val = estrai_prezzo(ann['prezzo'])
-            if 'venduto' in (ann['prezzo'] or '').lower():
-                continue
+            prezzo_val = None
+            if ann['prezzo'] and '€' in ann['prezzo']:
+                nums = re.findall(r"\d+[.,]?\d*", ann['prezzo'].replace(',', '.'))
+                prezzo_val = float(nums[0]) if nums else None
+
             if any(kw in titolo_l for kw in cfg.get('keyword_da_escludere', [])):
                 continue
             incl = cfg.get('keyword_da_includere') or []
@@ -282,19 +291,15 @@ def esegui_ricerca(driver, cfg):
                 continue
             filtrati.append(ann)
 
-        print(f"[{nome}] Trovati {len(filtrati)} annunci pertinenti (nuovi).")
+        print(f"[{nome}] Estratte {len(annunci)} card; pertinenti (nuovi) {len(filtrati)}.")
 
         # aggiorna cronologia con tutti i link visti in questa run
         tutti_link = {a['link'] for a in annunci}
         salva_link_attuali(cfg['file_cronologia'], link_precedenti | tutti_link)
         return filtrati
 
-    except TimeoutException:
-        print(f"[{nome}] Timeout in attesa degli annunci.")
-        return []
     except Exception as e:
         print(f"[{nome}] Errore imprevisto: {e}")
-        # screenshot
         safe = re.sub(r'[^a-z0-9]+', '_', nome.lower())
         screenshot_path = os.path.join(BASE_DIR, f"errore_{safe}.png")
         try:
@@ -305,40 +310,53 @@ def esegui_ricerca(driver, cfg):
         return []
 
 
+def build_driver():
+    # Tenta undetected-chromedriver se disponibile; altrimenti Selenium standard
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    if _uc is not None:
+        opts = _uc.ChromeOptions()
+        opts.add_argument('--headless=new')
+        opts.add_argument('--no-sandbox')
+        opts.add_argument('--disable-dev-shm-usage')
+        opts.add_argument('--window-size=1920,1080')
+        opts.add_argument('--lang=it-IT')
+        opts.add_argument('--disable-blink-features=AutomationControlled')
+        opts.add_argument(f'--user-agent={ua}')
+        driver = _uc.Chrome(options=opts, headless=True)
+        return driver
+
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--lang=it-IT')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument(f'--user-agent={ua}')
+    # velocizza: pageLoadStrategy eager per non bloccare su risorse non critiche
+    options.page_load_strategy = 'eager'
+    service = Service()
+    return webdriver.Chrome(service=service, options=options)
+
+# ----------------- MAIN -----------------
+
 def main():
     print("Avvio bot per monitoraggio annunci Subito.it…")
     configs = carica_configurazione()
     print("Config attive:", [c['nome_ricerca'] for c in configs])
-
-    chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument('--headless=new')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--window-size=1920,1080')
-    chrome_options.add_argument('--lang=it-IT')
-    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
     driver = None
     nuovi = {}
     errori = []
 
     try:
-        service = Service()
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        if stealth:
-            stealth(
-                driver,
-                languages=["it-IT", "it"],
-                vendor="Google Inc.",
-                platform="Win32",
-                webgl_vendor="Intel Inc.",
-                renderer="Intel Iris OpenGL Engine",
-                fix_hairline=True,
-            )
-
-        # visita home per (eventuale) cookie
+        driver = build_driver()
+        # visita home e accetta cookie
         driver.get("https://www.subito.it")
+        try:
+            wait_ready(driver, 20)
+        except Exception:
+            pass
         accetta_cookie_se_presente(driver)
 
         for cfg in configs:
