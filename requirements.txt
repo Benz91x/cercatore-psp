@@ -1,4 +1,5 @@
 selenium
-beautifulsoup4
-requests
 selenium-stealth
+beautifulsoup4
+pyyaml
+requests
