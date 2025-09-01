@@ -56,38 +56,3 @@ with:
 name: errore-screenshots
 path: errore_*.png
 if-no-files-found: ignore
-
-
----
-
-
-# Opzione B: mantieni cancellazione ma riduci overlap (se vuoi sempre il run più recente)
-name: Bot annunci Subito (latest only)
-
-
-on:
-schedule:
-- cron: "*/5 * * * *"
-workflow_dispatch: {}
-
-
-concurrency:
-group: subito-bot
-cancel-in-progress: true # <— il run nuovo cancella il precedente
-
-
-jobs:
-run:
-runs-on: ubuntu-latest
-timeout-minutes: 20
-
-
-steps:
-- name: Checkout repo
-uses: actions/checkout@v4
-
-
-- name: Setup Python
-uses: actions/setup-python@v5
-with:
-python-version: "3.11"
