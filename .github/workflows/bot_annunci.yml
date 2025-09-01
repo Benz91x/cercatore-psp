@@ -2,12 +2,17 @@ name: Bot annunci Subito
 
 on:
   schedule:
-  - cron: "*/5 * * * *" # ogni 5 minuti (UTC)
+    - cron: "*/5 * * * *"   # ogni 5 minuti (UTC)
   workflow_dispatch: {}
+
+concurrency:
+  group: subito-bot
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repo
@@ -18,7 +23,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Google Chrome
+      - name: Install Google Chrome (stable)
         run: |
           sudo apt-get update
           sudo apt-get install -y wget gpg
@@ -38,3 +43,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python bot_automatico_telegram.py
+
+      - name: Upload error screenshots
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: errore-screenshots
+          path: errore_*.png
+          if-no-files-found: ignore
