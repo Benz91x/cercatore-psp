@@ -1,5 +1,5 @@
 selenium
-selenium-stealth
 beautifulsoup4
 pyyaml
 requests
+undetected-chromedriver
