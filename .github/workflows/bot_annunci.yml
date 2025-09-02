@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: subito-bot
-  cancel-in-progress: false  # evita annullamenti a metà run
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -40,10 +40,12 @@ jobs:
         run: |
           python -u bot_automatico_telegram.py
 
-      - name: Upload error screenshots
-        if: ${{ failure() }}
+      - name: Upload diagnostics
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: errore-screenshots
-          path: errore_*.png
+          name: diagnostica
+          path: |
+            errore_*.png
+            dump_*.html
           if-no-files-found: ignore
