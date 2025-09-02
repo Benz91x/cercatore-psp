@@ -1,31 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor – versione Playwright (anti-timeout CI)
+Subito.it monitor – Playwright, locator-based (anti-timeout, anti-shadow DOM)
 
-Cosa cambia:
-- Usa Playwright (Chromium) invece di Selenium → headless più stabile su GitHub Actions
-- Selettori resilienti (href "/annunci/") + parsing con BeautifulSoup ad ogni scroll
-- Gestione cookie banner (root + iframe Usercentrics)
-- Scroll progressivo con stop anticipato quando si raggiungono abbastanza card
-- Screenshot su fallimento per debug
+- Estrazione annunci con Playwright locator (no BeautifulSoup su DOM statico)
+- Pattern URL estesi: /annunci/, /vi/, link assoluti
+- Scroll progressivo; stop quando si raggiunge una soglia
+- Cookie banner: root + iframe Usercentrics
+- Dump diagnostici: screenshot + HTML se non trova card
+- YAML cercato in: root, .github/workflows/, .github/workfloes/
 
-Configurazione: YAML opzionale (bot_annunci.yml in **root**). Se il YAML è vuoto/assente → default embedded.
-Variabili d'ambiente: TELEGRAM_BOT_TOKEN (obbl.), TELEGRAM_CHAT_ID (opz.)
+Dipendenze: playwright, pyyaml, requests
 """
 
 import os
 import re
 import time
+from typing import Dict, List
 import requests
-import bs4
-from typing import List, Dict
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-YAML_PATH = os.path.join(BASE_DIR, "bot_annunci.yml")
+YAML_CANDIDATES = [
+    os.path.join(BASE_DIR, "bot_annunci.yml"),
+    os.path.join(BASE_DIR, ".github", "workflows", "bot_annunci.yml"),
+    os.path.join(BASE_DIR, ".github", "workfloes", "bot_annunci.yml"),  # tollera il refuso
+]
 
-# ---- DEFAULT CONFIG (se YAML è assente/vuoto) ----
 DEFAULT_RICERCHE = [
     {
         "nome_ricerca": "PSP",
@@ -37,7 +38,7 @@ DEFAULT_RICERCHE = [
     },
     {
         "nome_ricerca": "Switch OLED",
-        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled&shp=true",
+        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled",
         "budget_massimo": 150,
         "keyword_da_includere": ["switch", "oled"],
         "keyword_da_escludere": ["riparazione", "cerco", "non funzionante"],
@@ -45,7 +46,7 @@ DEFAULT_RICERCHE = [
     },
     {
         "nome_ricerca": "PlayStation 5",
-        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5&shp=true",
+        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5",
         "budget_massimo": 200,
         "keyword_da_includere": ["ps5", "playstation 5", "playstation5"],
         "keyword_da_escludere": ["riparazione", "cerco", "non funzionante", "controller", "solo pad", "cover", "base"],
@@ -53,7 +54,7 @@ DEFAULT_RICERCHE = [
     },
     {
         "nome_ricerca": "Nintendo 3DS",
-        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds&shp=true",
+        "url": "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds",
         "budget_massimo": 120,
         "keyword_da_includere": ["3ds", "nintendo 3ds"],
         "keyword_da_escludere": ["solo giochi", "solo gioco", "solo custodia", "riparazione", "cerco", "non funzionante"],
@@ -61,16 +62,14 @@ DEFAULT_RICERCHE = [
     },
 ]
 
-# ---- ENV TELEGRAM ----
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # ---- YAML opzionale ----
 try:
-    import yaml  # pyyaml
+    import yaml
 except Exception:
     yaml = None
-
 
 def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
@@ -82,26 +81,28 @@ def _ensure_abs_cronofile(entry: Dict) -> Dict:
     entry["file_cronologia"] = fname
     return entry
 
-
 def carica_configurazione() -> List[Dict]:
-    if yaml and os.path.exists(YAML_PATH):
-        try:
-            with open(YAML_PATH, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            ricerche = data.get("ricerche")
-            if isinstance(ricerche, list) and ricerche:
-                print("[CFG] YAML caricato")
-                return [_ensure_abs_cronofile(dict(e)) for e in ricerche if isinstance(e, dict)]
-            print("[CFG] YAML vuoto: uso default")
-        except Exception as ex:
-            print(f"[CFG] YAML errore: {ex} – uso default")
+    if yaml:
+        for yp in YAML_CANDIDATES:
+            if os.path.exists(yp):
+                try:
+                    with open(yp, "r", encoding="utf-8") as f:
+                        data = yaml.safe_load(f) or {}
+                    ricerche = data.get("ricerche")
+                    if isinstance(ricerche, list) and ricerche:
+                        print(f"[CFG] YAML caricato: {yp}")
+                        return [_ensure_abs_cronofile(dict(e)) for e in ricerche if isinstance(e, dict)]
+                    else:
+                        print(f"[CFG] YAML vuoto: {yp} → uso default")
+                        break
+                except Exception as ex:
+                    print(f"[CFG] YAML errore: {ex} → uso default")
+                    break
     else:
-        if not yaml:
-            print("[CFG] pyyaml non presente: uso default")
-        else:
-            print("[CFG] YAML non trovato: uso default")
+        print("[CFG] pyyaml non presente: uso default")
     return [_ensure_abs_cronofile(dict(e)) for e in DEFAULT_RICERCHE]
 
+# ---- FS ----
 
 def carica_link_precedenti(path: str) -> set:
     if not os.path.exists(path):
@@ -109,19 +110,18 @@ def carica_link_precedenti(path: str) -> set:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return set(line.strip() for line in f if line.strip())
-    except Exception as e:
-        print(f"[FS] Lettura {path} fallita: {e}")
+    except Exception:
         return set()
-
 
 def salva_link_attuali(path: str, link_set: set):
     try:
         with open(path, "w", encoding="utf-8") as f:
             for link in sorted(list(link_set)):
                 f.write(link + "\n")
-    except Exception as e:
-        print(f"[FS] Scrittura {path} fallita: {e}")
+    except Exception:
+        pass
 
+# ---- Telegram ----
 
 def invia_notifica_telegram(msg: str):
     token = TELEGRAM_BOT_TOKEN
@@ -130,15 +130,14 @@ def invia_notifica_telegram(msg: str):
         print("[TG] Manca TELEGRAM_BOT_TOKEN")
         return
     if not chat_id:
-        # tentativo auto-discovery
         try:
             r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10)
             r.raise_for_status()
             data = r.json()
             for item in reversed(data.get("result", [])):
-                msg = item.get("message") or item.get("channel_post")
-                if msg and msg.get("chat", {}).get("id"):
-                    chat_id = str(msg["chat"]["id"])
+                m = item.get("message") or item.get("channel_post")
+                if m and m.get("chat", {}).get("id"):
+                    chat_id = str(m["chat"]["id"])
                     break
         except Exception:
             pass
@@ -156,23 +155,20 @@ def invia_notifica_telegram(msg: str):
     except Exception as e:
         print(f"[TG] Invio fallito: {e}")
 
-
 # ---- Playwright helpers ----
 
 def accept_cookies_if_present(page):
-    # 1) tentativo in root
+    # root
     try:
         btn = page.locator("button:has-text('Accetta')").first
-        if btn.is_visible():
+        if btn and btn.is_visible():
             btn.click(timeout=3000)
             time.sleep(0.2)
             print("[COOKIE] Accettato (root)")
             return
-    except PWTimeout:
-        pass
     except Exception:
         pass
-    # 2) tentativo dentro iframe Usercentrics
+    # iframe
     try:
         for frame in page.frames:
             try:
@@ -186,32 +182,77 @@ def accept_cookies_if_present(page):
     except Exception:
         pass
 
+AD_HREF_PATTERNS = [
+    "/annunci/",  # classico
+    "/vi/",       # variante
+]
 
-def extract_ads_from_html(html: str) -> List[Dict]:
-    soup = bs4.BeautifulSoup(html, "html.parser")
-    anchors = soup.select('[data-testid="listing-grid"] a[href*="/annunci/"]') or soup.select('a[href*="/annunci/"]')
-    out = []
-    for a in anchors:
-        href = a.get("href")
-        if not href:
-            continue
-        title_el = a.select_one('[data-testid="ad-title"], h2, h3')
-        titolo = (title_el.get_text(strip=True) if title_el else (a.get("aria-label") or a.get("title") or "")).strip() or "(senza titolo)"
-        price_el = a.select_one('[data-testid="ad-price"]')
-        prezzo = price_el.get_text(strip=True) if price_el else "N/D"
-        out.append({"link": href, "titolo": titolo, "prezzo": prezzo})
-    return out
+# includi anche link assoluti verso subito
+ABS_HOSTS = ["https://www.subito.it", "http://www.subito.it"]
 
 
-def scroll_and_collect(page, max_loops=10, pause_ms=900) -> List[Dict]:
+def is_ad_href(href: str) -> bool:
+    if not href:
+        return False
+    if any(p in href for p in AD_HREF_PATTERNS):
+        return True
+    if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
+        return True
+    return False
+
+
+def collect_ads(page, min_cards=12, loops=12, pause_ms=900) -> List[Dict]:
     seen = {}
-    for _ in range(max_loops):
-        html = page.content()
-        for a in extract_ads_from_html(html):
-            seen.setdefault(a['link'], a)
-        if len(seen) >= 20:
+    for i in range(loops):
+        # 1) usa locator che bucano lo shadow DOM
+        loc = page.locator(
+            "a[href*='/annunci/'], a[href*='/vi/'], a:has(h2), a:has(h3), a:has([data-testid='ad-title'])"
+        )
+        try:
+            count = loc.count()
+        except Exception:
+            count = 0
+
+        for idx in range(min(count, 150)):
+            a = loc.nth(idx)
+            try:
+                href = a.get_attribute("href")
+            except Exception:
+                href = None
+            if not href or not is_ad_href(href):
+                continue
+            # titolo
+            titolo = None
+            for sel in ("[data-testid='ad-title']", "h2", "h3"):
+                try:
+                    t = a.locator(sel).first
+                    if t and t.is_visible():
+                        titolo = (t.text_content() or "").strip()
+                        if titolo:
+                            break
+                except Exception:
+                    continue
+            if not titolo:
+                try:
+                    titolo = (a.get_attribute("aria-label") or a.get_attribute("title") or "").strip()
+                except Exception:
+                    titolo = ""
+            # prezzo
+            prezzo = None
+            for sel in ("[data-testid='ad-price']", "xpath=.//*[contains(text(),'€')]"):
+                try:
+                    p = a.locator(sel).first
+                    if p and p.is_visible():
+                        prezzo = (p.text_content() or "").strip()
+                        if prezzo:
+                            break
+                except Exception:
+                    continue
+            seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D"})
+
+        if len(seen) >= min_cards:
             break
-        page.evaluate("window.scrollBy(0, Math.max(700, window.innerHeight));")
+        page.evaluate("window.scrollBy(0, Math.max(800, window.innerHeight));")
         page.wait_for_timeout(pause_ms)
     return list(seen.values())
 
@@ -227,12 +268,21 @@ def run_search(page, cfg: Dict) -> List[Dict]:
             pass
         accept_cookies_if_present(page)
 
-        ads = scroll_and_collect(page, max_loops=12, pause_ms=1000)
+        ads = collect_ads(page, min_cards=10, loops=14, pause_ms=1000)
         if not ads:
-            # screenshot per debug
+            # Dump per debug
             sp = os.path.join(BASE_DIR, f"errore_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
-            page.screenshot(path=sp, full_page=True)
-            print(f"[{nome}] Nessuna card – screenshot: {sp}")
+            hp = os.path.join(BASE_DIR, f"dump_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
+            try:
+                page.screenshot(path=sp, full_page=True)
+            except Exception:
+                pass
+            try:
+                with open(hp, "w", encoding="utf-8") as f:
+                    f.write(page.content())
+            except Exception:
+                pass
+            print(f"[{nome}] Nessuna card – screenshot: {sp} – dump: {hp}")
             return []
 
         prev = carica_link_precedenti(cfg['file_cronologia'])
@@ -254,7 +304,7 @@ def run_search(page, cfg: Dict) -> List[Dict]:
                 continue
             out.append(ann)
 
-        print(f"[{nome}] Card estratte: {len(ads)}; nuove pertinenti: {len(out)}")
+        print(f"[{nome}] Card viste: {len(ads)}; nuove pertinenti: {len(out)}")
         salva_link_attuali(cfg['file_cronologia'], prev | {a['link'] for a in ads})
         return out
 
@@ -266,7 +316,6 @@ def run_search(page, cfg: Dict) -> List[Dict]:
         except Exception:
             print(f"[{nome}] Errore: {e}")
         return []
-
 
 # ---- MAIN ----
 
@@ -288,7 +337,7 @@ def main():
         )
         page = context.new_page()
 
-        # visita home per cookie, poi ricerche
+        # cookie upfront
         try:
             page.goto("https://www.subito.it", wait_until='domcontentloaded', timeout=25000)
             try:
@@ -300,9 +349,9 @@ def main():
             pass
 
         for cfg in cfgs:
-            results = run_search(page, cfg)
-            if results:
-                nuovi[cfg['nome_ricerca']] = results
+            res = run_search(page, cfg)
+            if res:
+                nuovi[cfg['nome_ricerca']] = res
 
         context.close()
         browser.close()
@@ -316,7 +365,6 @@ def main():
         invia_notifica_telegram(msg)
     else:
         print("[DONE] Nessun nuovo annuncio in questa esecuzione.")
-
 
 if __name__ == '__main__':
     main()
