@@ -1,5 +1,4 @@
-selenium
+playwright
 beautifulsoup4
 pyyaml
 requests
-undetected-chromedriver
