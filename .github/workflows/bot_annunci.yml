@@ -36,8 +36,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Google Chrome (stable) + minimal libs
+      - name: Install Google Chrome (stable) + minimal libs (Ubuntu 24.04)
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y wget gpg xvfb
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
@@ -45,11 +46,14 @@ jobs:
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
             | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable \
+          # Chrome stabile
+          sudo apt-get install -y google-chrome-stable
+          # Librerie runtime minime per Chrome su Noble (nota: libasound2 -> libasound2t64)
+          sudo apt-get install -y \
             libnss3 libnspr4 libatk-bridge2.0-0 libgtk-3-0 libxkbcommon0 libxcomposite1 \
-            libxdamage1 libxrandr2 libgbm1 libxshmfence1 libasound2 fonts-liberation
+            libxdamage1 libxrandr2 libgbm1 libxshmfence1 libasound2t64 fonts-liberation
 
-      # niente playwright install / install-deps: usiamo Chrome di sistema
+      # Nessun download di browser Playwright: usiamo Chrome di sistema headful
       - name: Run Subito bot (Chrome headful via Xvfb)
         env:
           PYTHONUNBUFFERED: "1"
