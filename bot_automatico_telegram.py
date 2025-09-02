@@ -1,32 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor – Playwright, locator-based (anti-timeout, anti-shadow DOM)
+Subito.it monitor – Playwright + Stealth (anti-WAF Akamai)
 
-- Estrazione annunci con Playwright locator (no BeautifulSoup su DOM statico)
-- Pattern URL estesi: /annunci/, /vi/, link assoluti
-- Scroll progressivo; stop quando si raggiunge una soglia
-- Cookie banner: root + iframe Usercentrics
-- Dump diagnostici: screenshot + HTML se non trova card
-- YAML cercato in: root, .github/workflows/, .github/workfloes/
+- Playwright (Chromium) + header “umani” e referer coerente
+- Stealth: navigator.webdriver, languages, plugins, chrome.runtime, WebGL vendor/renderer, permissions
+- Interazioni minime (scroll/mouse) per ridurre fingerprinting
+- Fallback config: se bot_annunci.yml è assente/vuoto usa DEFAULT_RICERCHE
+- Proxy opzionale via env PROXY_URL (es. http://user:pass@host:port)
 
-Dipendenze: playwright, pyyaml, requests
+Dipendenze: playwright, pyyaml, requests, (opzionale) playwright-stealth
 """
-
-import os
-import re
-import time
+import os, re, time, random, requests
 from typing import Dict, List
-import requests
-
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
     os.path.join(BASE_DIR, "bot_annunci.yml"),
     os.path.join(BASE_DIR, ".github", "workflows", "bot_annunci.yml"),
-    os.path.join(BASE_DIR, ".github", "workfloes", "bot_annunci.yml"),  # tollera il refuso
+    os.path.join(BASE_DIR, ".github", "workfloes", "bot_annunci.yml"),  # tollera refuso
 ]
 
+# ---------- DEFAULT CONFIG ----------
 DEFAULT_RICERCHE = [
     {
         "nome_ricerca": "PSP",
@@ -62,12 +57,14 @@ DEFAULT_RICERCHE = [
     },
 ]
 
+# ---------- ENV ----------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+PROXY_URL = os.environ.get("PROXY_URL")  # es. http://user:pass@host:port
 
-# ---- YAML opzionale ----
+# ---------- YAML opzionale ----------
 try:
-    import yaml
+    import yaml  # pyyaml
 except Exception:
     yaml = None
 
@@ -102,8 +99,7 @@ def carica_configurazione() -> List[Dict]:
         print("[CFG] pyyaml non presente: uso default")
     return [_ensure_abs_cronofile(dict(e)) for e in DEFAULT_RICERCHE]
 
-# ---- FS ----
-
+# ---------- FS ----------
 def carica_link_precedenti(path: str) -> set:
     if not os.path.exists(path):
         return set()
@@ -121,8 +117,7 @@ def salva_link_attuali(path: str, link_set: set):
     except Exception:
         pass
 
-# ---- Telegram ----
-
+# ---------- Telegram ----------
 def invia_notifica_telegram(msg: str):
     token = TELEGRAM_BOT_TOKEN
     chat_id = TELEGRAM_CHAT_ID
@@ -147,7 +142,7 @@ def invia_notifica_telegram(msg: str):
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": msg, "parse_mode":"HTML", "disable_web_page_preview": True},
+            data={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True},
             timeout=20,
         )
         r.raise_for_status()
@@ -155,8 +150,57 @@ def invia_notifica_telegram(msg: str):
     except Exception as e:
         print(f"[TG] Invio fallito: {e}")
 
-# ---- Playwright helpers ----
+# ---------- Stealth ----------
+STEALTH_JS = r"""
+// webdriver
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 
+// languages
+Object.defineProperty(navigator, 'languages', {get: () => ['it-IT','it','en-US','en']});
+
+// plugins
+Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+
+// platform & hardware
+Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+
+// chrome runtime
+window.chrome = { runtime: {} };
+
+// permissions
+const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+if (originalQuery) {
+  window.navigator.permissions.query = (parameters) => (
+    parameters && parameters.name === 'notifications'
+      ? Promise.resolve({ state: 'granted' })
+      : originalQuery(parameters)
+  );
+}
+
+// WebGL vendor/renderer
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+  if (parameter === 37445) return 'Intel Inc.'; // UNMASKED_VENDOR_WEBGL
+  if (parameter === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+  return getParameter.apply(this, arguments);
+};
+"""
+
+AD_HREF_PATTERNS = ["/annunci/", "/vi/"]
+ABS_HOSTS = ["https://www.subito.it", "http://www.subito.it"]
+
+def is_ad_href(href: str) -> bool:
+    if not href:
+        return False
+    if any(p in href for p in AD_HREF_PATTERNS):
+        return True
+    if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
+        return True
+    return False
+
+# ---------- Playwright helpers ----------
 def accept_cookies_if_present(page):
     # root
     try:
@@ -182,45 +226,41 @@ def accept_cookies_if_present(page):
     except Exception:
         pass
 
-AD_HREF_PATTERNS = [
-    "/annunci/",  # classico
-    "/vi/",       # variante
-]
+def humanize(page):
+    # piccoli movimenti/scroll casuali
+    w = page.viewport_size["width"]
+    h = page.viewport_size["height"]
+    x = random.randint(50, min(400, w-50))
+    y = random.randint(50, min(300, h-50))
+    try:
+        page.mouse.move(x, y)
+        page.wait_for_timeout(random.randint(150, 350))
+        page.evaluate("window.scrollBy(0, Math.max(600, window.innerHeight));")
+        page.wait_for_timeout(random.randint(200, 400))
+    except Exception:
+        pass
 
-# includi anche link assoluti verso subito
-ABS_HOSTS = ["https://www.subito.it", "http://www.subito.it"]
-
-
-def is_ad_href(href: str) -> bool:
-    if not href:
-        return False
-    if any(p in href for p in AD_HREF_PATTERNS):
-        return True
-    if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
-        return True
-    return False
-
-
-def collect_ads(page, min_cards=12, loops=12, pause_ms=900) -> List[Dict]:
+def collect_ads(page, min_cards=10, loops=12, pause_ms=900):
     seen = {}
-    for i in range(loops):
-        # 1) usa locator che bucano lo shadow DOM
+    for _ in range(loops):
+        # locator-based (attraversa shadow DOM)
         loc = page.locator(
             "a[href*='/annunci/'], a[href*='/vi/'], a:has(h2), a:has(h3), a:has([data-testid='ad-title'])"
         )
         try:
-            count = loc.count()
+            count = min(loc.count(), 200)
         except Exception:
             count = 0
 
-        for idx in range(min(count, 150)):
-            a = loc.nth(idx)
+        for i in range(count):
+            a = loc.nth(i)
             try:
                 href = a.get_attribute("href")
             except Exception:
                 href = None
             if not href or not is_ad_href(href):
                 continue
+
             # titolo
             titolo = None
             for sel in ("[data-testid='ad-title']", "h2", "h3"):
@@ -248,29 +288,32 @@ def collect_ads(page, min_cards=12, loops=12, pause_ms=900) -> List[Dict]:
                             break
                 except Exception:
                     continue
+
             seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D"})
 
         if len(seen) >= min_cards:
             break
-        page.evaluate("window.scrollBy(0, Math.max(800, window.innerHeight));")
+
+        humanize(page)
         page.wait_for_timeout(pause_ms)
     return list(seen.values())
 
-
 def run_search(page, cfg: Dict) -> List[Dict]:
-    nome = cfg['nome_ricerca']
+    nome = cfg["nome_ricerca"]
     print(f"\n--- Ricerca: {nome} ---")
     try:
-        page.goto(cfg['url'], wait_until='domcontentloaded', timeout=30000)
+        # referer esplicito + headers coerenti
+        page.goto(cfg["url"], wait_until="domcontentloaded", timeout=30000, referer="https://www.subito.it/")
         try:
-            page.wait_for_load_state('networkidle', timeout=20000)
+            page.wait_for_load_state("networkidle", timeout=20000)
         except PWTimeout:
             pass
-        accept_cookies_if_present(page)
 
-        ads = collect_ads(page, min_cards=10, loops=14, pause_ms=1000)
+        accept_cookies_if_present(page)
+        humanize(page)
+
+        ads = collect_ads(page, min_cards=12, loops=14, pause_ms=1000)
         if not ads:
-            # Dump per debug
             sp = os.path.join(BASE_DIR, f"errore_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
             hp = os.path.join(BASE_DIR, f"dump_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
             try:
@@ -285,27 +328,27 @@ def run_search(page, cfg: Dict) -> List[Dict]:
             print(f"[{nome}] Nessuna card – screenshot: {sp} – dump: {hp}")
             return []
 
-        prev = carica_link_precedenti(cfg['file_cronologia'])
+        prev = carica_link_precedenti(cfg["file_cronologia"])
         out = []
         for ann in ads:
-            title_l = (ann['titolo'] or '').lower()
+            title_l = (ann["titolo"] or "").lower()
             price_val = None
-            if ann['prezzo'] and '€' in ann['prezzo']:
-                m = re.findall(r"\d+[.,]?\d*", ann['prezzo'].replace(',', '.'))
+            if ann["prezzo"] and "€" in ann["prezzo"]:
+                m = re.findall(r"\d+[.,]?\d*", ann["prezzo"].replace(",", "."))
                 price_val = float(m[0]) if m else None
-            if any(kw in title_l for kw in cfg.get('keyword_da_escludere', [])):
+            if any(kw in title_l for kw in cfg.get("keyword_da_escludere", [])):
                 continue
-            inc = cfg.get('keyword_da_includere') or []
+            inc = cfg.get("keyword_da_includere") or []
             if inc and not any(kw in title_l for kw in inc):
                 continue
-            if (price_val is not None) and (price_val > cfg.get('budget_massimo', 9e9)):
+            if (price_val is not None) and (price_val > cfg.get("budget_massimo", 9e9)):
                 continue
-            if ann['link'] in prev:
+            if ann["link"] in prev:
                 continue
             out.append(ann)
 
         print(f"[{nome}] Card viste: {len(ads)}; nuove pertinenti: {len(out)}")
-        salva_link_attuali(cfg['file_cronologia'], prev | {a['link'] for a in ads})
+        salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in ads})
         return out
 
     except Exception as e:
@@ -317,41 +360,80 @@ def run_search(page, cfg: Dict) -> List[Dict]:
             print(f"[{nome}] Errore: {e}")
         return []
 
-# ---- MAIN ----
-
+# ---------- MAIN ----------
 def main():
-    print("[BOOT] Avvio bot (Playwright)…")
+    print("[BOOT] Avvio bot (Playwright + Stealth)…")
     cfgs = carica_configurazione()
-    print("[CFG] Attive:", [c['nome_ricerca'] for c in cfgs])
+    print("[CFG] Attive:", [c["nome_ricerca"] for c in cfgs])
 
-    UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    # UA credibile (Chrome major 121–123 random)
+    chrome_major = random.choice([121, 122, 123])
+    UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_major}.0.0.0 Safari/537.36"
 
-    nuovi = {}
+    extra_headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        # I client hints spesso sono gestiti internamente; aggiungerli qui non danneggia:
+        "sec-ch-ua": "\"Chromium\";v=\"{}\", \"Not:A-Brand\";v=\"99\"".format(chrome_major),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"Windows\"",
+    }
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        launch_kwargs = {
+            "headless": True,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage", "--lang=it-IT", "--disable-blink-features=AutomationControlled"]
+        }
+        if PROXY_URL:
+            launch_kwargs["proxy"] = {"server": PROXY_URL}
+
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             locale="it-IT",
+            timezone_id="Europe/Rome",
             user_agent=UA,
             viewport={"width": 1920, "height": 1080},
         )
+        context.set_extra_http_headers(extra_headers)
+        context.add_init_script(STEALTH_JS)
+
+        # Se disponibile, usa playwright-stealth (non obbligatorio)
+        try:
+            from playwright_stealth import stealth_sync  # type: ignore
+            stealth_enabled = True
+        except Exception:
+            stealth_enabled = False
+
         page = context.new_page()
+        if stealth_enabled:
+            try:
+                stealth_sync(page)
+                print("[STEALTH] playwright-stealth applicato")
+            except Exception:
+                print("[STEALTH] playwright-stealth non applicato (fallback JS)")
 
         # cookie upfront
         try:
-            page.goto("https://www.subito.it", wait_until='domcontentloaded', timeout=25000)
+            page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
             try:
-                page.wait_for_load_state('networkidle', timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=12000)
             except PWTimeout:
                 pass
             accept_cookies_if_present(page)
+            humanize(page)
         except Exception:
             pass
 
+        nuovi = {}
         for cfg in cfgs:
             res = run_search(page, cfg)
             if res:
-                nuovi[cfg['nome_ricerca']] = res
+                nuovi[cfg["nome_ricerca"]] = res
 
         context.close()
         browser.close()
@@ -366,5 +448,5 @@ def main():
     else:
         print("[DONE] Nessun nuovo annuncio in questa esecuzione.")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
