@@ -28,19 +28,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright browsers
+      - name: Install Google Chrome (stable)
         run: |
-          python -m playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y wget gpg xvfb
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
-      - name: Run Subito bot (unbuffered)
+      - name: Install Playwright deps (system)
+        run: |
+          python -m playwright install-deps
+
+      - name: Run Subito bot (Chrome headful via Xvfb)
         env:
           PYTHONUNBUFFERED: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # opzionale: usa un proxy residenziale se il WAF blocca gli IP GitHub
-          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
-          python -u bot_automatico_telegram.py
+          xvfb-run -a python -u bot_automatico_telegram.py
 
       - name: Upload diagnostics
         if: ${{ always() }}
