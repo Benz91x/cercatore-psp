@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful + estrazione ibrida (DOM locator + JSON-LD + __NEXT_DATA__)
+Subito.it monitor — Playwright headful + estrazione ibrida:
+- DOM (locator che attraversano shadow DOM)
+- JSON strutturato (script application/ld+json + __NEXT_DATA__)
+- NETWORK SNIFFER: intercetta le risposte XHR/fetch e cerca liste di annunci
 
-Perché questa versione:
-- Alcune SERP sono SPA: le card non sempre sono <a href="/annunci/..."> visibili.
-- Fallback robusto: se i locator non vedono card, leggiamo gli script strutturati (JSON-LD, __NEXT_DATA__).
-- Mantiene le difese anti-bot già usate: Chrome stable headful (via Xvfb in CI), headers “umani”, referer e stealth JS.
+In CI usa Chrome stabile headful (xvfb-run nel workflow), headers "umani", referer e stealth JS.
 """
-
 import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
@@ -21,17 +20,17 @@ YAML_CANDIDATES = [
 ]
 
 DEFAULT_RICERCHE = [
-    {"nome_ricerca":"PSP","url":"https://www.subito.it/annunci-italia/vendita/usato/?q=psp","budget_massimo":50,
+    {"nome_ricerca":"PSP","url":"https://www.subito.it/annunci-italia/vendita/usato/?q=psp","budget_massimo":80,
      "keyword_da_includere":["psp"],"keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_psp.txt")},
-    {"nome_ricerca":"Switch OLED","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled","budget_massimo":150,
+    {"nome_ricerca":"Switch OLED","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled","budget_massimo":250,
      "keyword_da_includere":["switch","oled"],"keyword_da_escludere":["riparazione","cerco","non funzionante"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_switch.txt")},
-    {"nome_ricerca":"PlayStation 5","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5","budget_massimo":200,
+    {"nome_ricerca":"PlayStation 5","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5","budget_massimo":400,
      "keyword_da_includere":["ps5","playstation 5","playstation5"],
      "keyword_da_escludere":["riparazione","cerco","non funzionante","controller","solo pad","cover","base"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_ps5.txt")},
-    {"nome_ricerca":"Nintendo 3DS","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds","budget_massimo":120,
+    {"nome_ricerca":"Nintendo 3DS","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds","budget_massimo":180,
      "keyword_da_includere":["3ds","nintendo 3ds"],"keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco","non funzionante"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_3ds.txt")},
 ]
@@ -181,13 +180,13 @@ def query_from_url(url: str) -> Optional[str]:
         return None
 
 # ---------------- Estrazione DOM (locator) ----------------
-def collect_ads_dom(page: Page, min_cards=10, loops=14, pause_ms=900) -> List[Dict]:
+def collect_ads_dom(page: Page, min_cards=1, loops=14, pause_ms=800) -> List[Dict]:
     seen = {}
     for _ in range(loops):
         loc = page.locator(
             "a[href*='/annunci/'], a[href*='/vi/'], a:has(h2), a:has(h3), a:has([data-testid='ad-title'])"
         )
-        try: count = min(loc.count(), 200)
+        try: count = min(loc.count(), 300)
         except Exception: count = 0
         for i in range(count):
             a = loc.nth(i)
@@ -222,36 +221,28 @@ def collect_ads_dom(page: Page, min_cards=10, loops=14, pause_ms=900) -> List[Di
         humanize(page); page.wait_for_timeout(pause_ms)
     return list(seen.values())
 
-# ---------------- Estrazione STRUTTURATA (JSON-LD / __NEXT_DATA__) ----------------
+# ---------------- Estrazione STRUTTURATA ----------------
 def _maybe_price(obj: Any) -> Optional[str]:
     if isinstance(obj, dict):
-        for k in ("price", "priceLabel", "price_value", "priceValue", "prezzo"):
-            if k in obj and obj[k]:
-                return str(obj[k])
-        # schema.org
-        if obj.get("@type") in ("Offer", "AggregateOffer"):
+        for k in ("price","priceLabel","price_value","priceValue","prezzo"):
+            if k in obj and obj[k]: return str(obj[k])
+        if obj.get("@type") in ("Offer","AggregateOffer"):
             p = obj.get("price") or obj.get("lowPrice")
             if p: return f"{p} €"
     return None
 
 def _ad_from_dict(d: Dict) -> Optional[Dict]:
-    # Prova a dedurre link/titolo/prezzo in modo generico
-    link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url")
-    if not link or not is_ad_href(link): 
-        return None
+    link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url") or d.get("webUrl")
+    if not link or not is_ad_href(link): return None
     titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
     prezzo = _maybe_price(d)
-    # schema.org Item
     if not prezzo and "offers" in d and isinstance(d["offers"], (dict, list)):
-        if isinstance(d["offers"], dict):
-            prezzo = _maybe_price(d["offers"])
+        if isinstance(d["offers"], dict): prezzo = _maybe_price(d["offers"]) or prezzo
         else:
             for off in d["offers"]:
                 prezzo = _maybe_price(off)
                 if prezzo: break
-    if not titolo: titolo = "(senza titolo)"
-    if not prezzo: prezzo = "N/D"
-    return {"link": link, "titolo": str(titolo), "prezzo": str(prezzo)}
+    return {"link": link, "titolo": str(titolo or "(senza titolo)"), "prezzo": str(prezzo or "N/D")}
 
 def _walk_collect(obj: Any, out: Dict):
     if isinstance(obj, dict):
@@ -261,15 +252,15 @@ def _walk_collect(obj: Any, out: Dict):
         for v in obj.values():
             _walk_collect(v, out)
     elif isinstance(obj, list):
-        for it in obj: _walk_collect(it, out)
+        for it in obj:
+            _walk_collect(it, out)
 
 def collect_ads_structured(page: Page) -> List[Dict]:
     out: Dict[str, Dict] = {}
-
-    # 1) JSON-LD scripts
+    # JSON-LD
     try:
         els = page.locator("script[type='application/ld+json']")
-        for i in range(min(els.count(), 30)):
+        for i in range(min(els.count(), 40)):
             try:
                 raw = els.nth(i).text_content()
                 if not raw: continue
@@ -279,8 +270,7 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 continue
     except Exception:
         pass
-
-    # 2) __NEXT_DATA__
+    # __NEXT_DATA__
     try:
         nd = page.locator("script#__NEXT_DATA__")
         if nd and nd.count() > 0:
@@ -290,17 +280,67 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 _walk_collect(data, out)
     except Exception:
         pass
-
     return list(out.values())
 
+# ---------------- Estrazione via NETWORK ----------------
+
+def collect_ads_network(page: Page, capture_ms: int = 3000) -> List[Dict]:
+    """Intercetta risposte JSON e prova a estrarre liste di annunci.
+    Salva un dump grezzo per diagnosi se non trova nulla.
+    """
+    buf: Dict[str, Dict] = {}
+
+    def safe_json(resp: Response):
+        try:
+            ct = resp.headers.get("content-type", "").lower()
+        except Exception:
+            ct = ""
+        if "json" not in ct:
+            return None
+        try:
+            return resp.json()
+        except Exception:
+            try:
+                txt = resp.text()
+                return json.loads(txt)
+            except Exception:
+                return None
+
+    def on_response(resp: Response):
+        url = resp.url
+        try:
+            data = safe_json(resp)
+            if not data:
+                return
+            # euristica: solo endpoint che sembrano di ricerca/lista
+            if not any(k in url for k in ("search", "list", "listing", "ads", "results")):
+                # comunque prova: alcuni endpoint hanno nomi generici
+                pass
+            _walk_collect(data, buf)
+        except Exception:
+            return
+
+    page.on("response", on_response)
+    page.wait_for_timeout(capture_ms)
+
+    # dump se vuoto
+    if not buf:
+        try:
+            path = os.path.join(BASE_DIR, "netdump_empty.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"note":"nessun JSON intercettato"}, f)
+        except Exception:
+            pass
+    return list(buf.values())
+
 # ---------------- Flow di ricerca ----------------
+
 def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
     try:
         page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
         try: page.wait_for_load_state("networkidle", timeout=8000)
         except PWTimeout: pass
         accept_cookies_if_present(page); humanize(page)
-
         selectors = [
             "input[placeholder*='Cosa cerchi']", "input[name='q']",
             "input[type='search']", "input[aria-label*='cerca' i]"
@@ -312,17 +352,14 @@ def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
                 if loc and loc.is_visible():
                     box = loc; break
             except Exception: continue
-        if not box: 
-            print("[FLOW] Campo di ricerca non trovato"); 
-            return False
-
+        if not box:
+            print("[FLOW] Campo di ricerca non trovato"); return False
         box.click()
         for ch in query:
-            box.type(ch, delay=random.randint(30, 80))
+            box.type(ch, delay=random.randint(30, 70))
         page.keyboard.press("Enter")
         try: page.wait_for_load_state("domcontentloaded", timeout=12000)
         except PWTimeout: pass
-
         try:
             page.wait_for_selector("a[href*='/annunci/'], a[href*='/vi/'], script[type='application/ld+json']", timeout=wait_ms)
             return True
@@ -332,18 +369,18 @@ def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
         return False
 
 # ---------------- Esecuzione singola ricerca ----------------
+
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
 
-    # 1) prova URL diretto
+    # 1) URL diretto
     try:
         page.goto(target, wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
         try: page.wait_for_load_state("networkidle", timeout=12000)
         except PWTimeout: pass
         accept_cookies_if_present(page); humanize(page)
     except Exception:
-        # 2) fallback: user-flow
         q = query_from_url(target) or cfg.get("nome_ricerca")
         print(f"[FLOW] Problema accesso diretto → simulo ricerca per '{q}'")
         if not simulate_search_flow(page, q):
@@ -357,40 +394,46 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
             print(f"[{nome}] Fallito anche search flow – screenshot: {sp} – dump: {hp}")
             return []
 
-    # 3) estrazione: DOM locator
-    ads_dom = collect_ads_dom(page, min_cards=12, loops=14, pause_ms=900)
+    # 2) NETWORK sniff prima di scroll (per catturare la prima risposta JSON)
+    net_ads = collect_ads_network(page, capture_ms=2500)
 
-    # 4) fallback strutturato se DOM scarso
-    ads_struct = []
-    if len(ads_dom) < 5:  # soglia euristica
-        ads_struct = collect_ads_structured(page)
+    # 3) DOM
+    dom_ads = collect_ads_dom(page, min_cards=1, loops=14, pause_ms=700)
 
-    # unisci risultati
-    seen = {}
-    for lst in (ads_dom, ads_struct):
+    # 4) Strutturato
+    struct_ads = []
+    if len(dom_ads) < 3 and len(net_ads) < 3:
+        struct_ads = collect_ads_structured(page)
+
+    # Unione con priorità: network > DOM > strutturato
+    merged: Dict[str, Dict] = {}
+    for lst in (net_ads, dom_ads, struct_ads):
         for a in lst:
-            seen.setdefault(a["link"], a)
-    ads = list(seen.values())
+            merged.setdefault(a["link"], a)
+    ads = list(merged.values())
 
     if not ads:
         sp = os.path.join(BASE_DIR, f"errore_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
         hp = os.path.join(BASE_DIR, f"dump_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
         try: page.screenshot(path=sp, full_page=True)
         except Exception: pass
-        try:
+        try: 
             with open(hp,"w",encoding="utf-8") as f: f.write(page.content())
         except Exception: pass
         print(f"[{nome}] Nessuna card – screenshot: {sp} – dump: {hp}")
         return []
 
+    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} → tot unici: {len(ads)}")
+
     # Filtri + dedup + salvataggio cronologia
     prev = carica_link_precedenti(cfg["file_cronologia"])
     out = []
     for ann in ads:
-        title_l = (ann["titolo"] or "").lower()
+        title_l = (ann.get("titolo") or "").lower()
         price_val = None
-        if ann["prezzo"] and "€" in ann["prezzo"]:
-            m = re.findall(r"\d+[.,]?\d*", ann["prezzo"].replace(",", "."))
+        price_txt = ann.get("prezzo") or ""
+        if "€" in price_txt:
+            m = re.findall(r"\d+[.,]?\d*", price_txt.replace(",", "."))
             price_val = float(m[0]) if m else None
         if any(kw in title_l for kw in cfg.get("keyword_da_escludere", [])): continue
         inc = cfg.get("keyword_da_includere") or []
@@ -399,7 +442,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         if ann["link"] in prev: continue
         out.append(ann)
 
-    print(f"[{nome}] Card DOM:{len(ads_dom)} + JSON:{len(ads_struct)} → nuove pertinenti: {len(out)}")
+    print(f"[{nome}] Nuove pertinenti: {len(out)}")
     salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in ads})
     return out
 
@@ -421,7 +464,6 @@ def main():
     }
 
     with sync_playwright() as p:
-        # Chrome stabile headful (in Actions usiamo xvfb-run)
         browser = p.chromium.launch(
             channel="chrome",
             headless=False,
@@ -432,7 +474,9 @@ def main():
             timezone_id="Europe/Rome",
             user_agent=UA,
             viewport={"width":1920,"height":1080},
+            geolocation={"latitude":41.9028, "longitude":12.4964},
         )
+        context.grant_permissions(["geolocation"])  # alcune SERP usano geo
         context.set_extra_http_headers(extra_headers)
         context.add_init_script(STEALTH_JS)
 
