@@ -37,6 +37,8 @@ jobs:
           PYTHONUNBUFFERED: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # opzionale: usa un proxy residenziale se il WAF blocca gli IP GitHub
+          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           python -u bot_automatico_telegram.py
 
