@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor – Playwright + Chrome stable headful (senza proxy), anti-WAF
-- Chrome canale "chrome" (stabile) + Xvfb in Actions → fingerprint più "umano"
-- Stealth: navigator.webdriver off, languages, plugins, WebGL vendor/renderer
-- Headers realistici + referer
-- Fallback: se Access Denied sugli URL diretti, simula la ricerca dalla home
-- Screenshot + HTML dump per diagnosi
+Subito.it monitor — Playwright headful + estrazione ibrida (DOM locator + JSON-LD + __NEXT_DATA__)
 
-Dipendenze: playwright, pyyaml, requests
+Perché questa versione:
+- Alcune SERP sono SPA: le card non sempre sono <a href="/annunci/..."> visibili.
+- Fallback robusto: se i locator non vedono card, leggiamo gli script strutturati (JSON-LD, __NEXT_DATA__).
+- Mantiene le difese anti-bot già usate: Chrome stable headful (via Xvfb in CI), headers “umani”, referer e stealth JS.
 """
 
-import os, re, time, random, requests
-from typing import Dict, List, Optional
+import os, re, time, random, json, requests
+from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page
 
@@ -46,6 +44,7 @@ try:
 except Exception:
     yaml = None
 
+# ---------------- FS & CFG ----------------
 def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
     if not fname:
@@ -94,6 +93,7 @@ def salva_link_attuali(path: str, link_set: set):
     except Exception:
         pass
 
+# ---------------- Telegram ----------------
 def invia_notifica_telegram(msg: str):
     token = TELEGRAM_BOT_TOKEN; chat_id = TELEGRAM_CHAT_ID
     if not token:
@@ -116,7 +116,7 @@ def invia_notifica_telegram(msg: str):
     except Exception as e:
         print(f"[TG] Invio fallito: {e}")
 
-# -------- Stealth JS --------
+# ---------------- Stealth JS ----------------
 STEALTH_JS = r"""
 Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
 Object.defineProperty(navigator,'languages',{get:()=>['it-IT','it','en-US','en']});
@@ -147,15 +147,7 @@ def is_ad_href(href: Optional[str]) -> bool:
     if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS): return True
     return False
 
-def access_denied(page: Page) -> bool:
-    try:
-        title = (page.title() or "").lower()
-        if "access denied" in title: return True
-        txt = (page.text_content("body") or "").lower()
-        return "access denied" in txt or "edgesuite" in txt or "permission to access" in txt
-    except Exception:
-        return False
-
+# ---------------- Helpers Playwright ----------------
 def accept_cookies_if_present(page: Page):
     try:
         btn = page.locator("button:has-text('Accetta')").first
@@ -188,51 +180,8 @@ def query_from_url(url: str) -> Optional[str]:
     except Exception:
         return None
 
-def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
-    """
-    Simula la ricerca dalla home (digitazione + Enter). Ritorna True se arriviamo alla pagina risultati.
-    """
-    try:
-        page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
-        try: page.wait_for_load_state("networkidle", timeout=8000)
-        except PWTimeout: pass
-        accept_cookies_if_present(page)
-        humanize(page)
-
-        # input di ricerca: diversi selettori di fallback
-        selectors = [
-            "input[placeholder*='Cosa cerchi']", "input[name='q']",
-            "input[type='search']", "input[aria-label*='cerca' i]"
-        ]
-        box = None
-        for sel in selectors:
-            try:
-                loc = page.locator(sel).first
-                if loc and loc.is_visible():
-                    box = loc; break
-            except Exception: continue
-        if not box:
-            print("[FLOW] Campo di ricerca non trovato"); return False
-
-        box.click()
-        for ch in query:
-            box.type(ch, delay=random.randint(30, 80))
-        page.keyboard.press("Enter")
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=12000)
-        except PWTimeout:
-            pass
-
-        # attesa che compaiano anchor plausibili
-        try:
-            page.wait_for_selector("a[href*='/annunci/'], a[href*='/vi/']", timeout=wait_ms)
-            return True
-        except PWTimeout:
-            return False
-    except Exception:
-        return False
-
-def collect_ads(page: Page, min_cards=12, loops=14, pause_ms=900) -> List[Dict]:
+# ---------------- Estrazione DOM (locator) ----------------
+def collect_ads_dom(page: Page, min_cards=10, loops=14, pause_ms=900) -> List[Dict]:
     seen = {}
     for _ in range(loops):
         loc = page.locator(
@@ -273,25 +222,130 @@ def collect_ads(page: Page, min_cards=12, loops=14, pause_ms=900) -> List[Dict]:
         humanize(page); page.wait_for_timeout(pause_ms)
     return list(seen.values())
 
+# ---------------- Estrazione STRUTTURATA (JSON-LD / __NEXT_DATA__) ----------------
+def _maybe_price(obj: Any) -> Optional[str]:
+    if isinstance(obj, dict):
+        for k in ("price", "priceLabel", "price_value", "priceValue", "prezzo"):
+            if k in obj and obj[k]:
+                return str(obj[k])
+        # schema.org
+        if obj.get("@type") in ("Offer", "AggregateOffer"):
+            p = obj.get("price") or obj.get("lowPrice")
+            if p: return f"{p} €"
+    return None
+
+def _ad_from_dict(d: Dict) -> Optional[Dict]:
+    # Prova a dedurre link/titolo/prezzo in modo generico
+    link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url")
+    if not link or not is_ad_href(link): 
+        return None
+    titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
+    prezzo = _maybe_price(d)
+    # schema.org Item
+    if not prezzo and "offers" in d and isinstance(d["offers"], (dict, list)):
+        if isinstance(d["offers"], dict):
+            prezzo = _maybe_price(d["offers"])
+        else:
+            for off in d["offers"]:
+                prezzo = _maybe_price(off)
+                if prezzo: break
+    if not titolo: titolo = "(senza titolo)"
+    if not prezzo: prezzo = "N/D"
+    return {"link": link, "titolo": str(titolo), "prezzo": str(prezzo)}
+
+def _walk_collect(obj: Any, out: Dict):
+    if isinstance(obj, dict):
+        cand = _ad_from_dict(obj)
+        if cand and cand["link"] not in out:
+            out[cand["link"]] = cand
+        for v in obj.values():
+            _walk_collect(v, out)
+    elif isinstance(obj, list):
+        for it in obj: _walk_collect(it, out)
+
+def collect_ads_structured(page: Page) -> List[Dict]:
+    out: Dict[str, Dict] = {}
+
+    # 1) JSON-LD scripts
+    try:
+        els = page.locator("script[type='application/ld+json']")
+        for i in range(min(els.count(), 30)):
+            try:
+                raw = els.nth(i).text_content()
+                if not raw: continue
+                data = json.loads(raw)
+                _walk_collect(data, out)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 2) __NEXT_DATA__
+    try:
+        nd = page.locator("script#__NEXT_DATA__")
+        if nd and nd.count() > 0:
+            raw = nd.first.text_content()
+            if raw:
+                data = json.loads(raw)
+                _walk_collect(data, out)
+    except Exception:
+        pass
+
+    return list(out.values())
+
+# ---------------- Flow di ricerca ----------------
+def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
+    try:
+        page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
+        try: page.wait_for_load_state("networkidle", timeout=8000)
+        except PWTimeout: pass
+        accept_cookies_if_present(page); humanize(page)
+
+        selectors = [
+            "input[placeholder*='Cosa cerchi']", "input[name='q']",
+            "input[type='search']", "input[aria-label*='cerca' i]"
+        ]
+        box = None
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc and loc.is_visible():
+                    box = loc; break
+            except Exception: continue
+        if not box: 
+            print("[FLOW] Campo di ricerca non trovato"); 
+            return False
+
+        box.click()
+        for ch in query:
+            box.type(ch, delay=random.randint(30, 80))
+        page.keyboard.press("Enter")
+        try: page.wait_for_load_state("domcontentloaded", timeout=12000)
+        except PWTimeout: pass
+
+        try:
+            page.wait_for_selector("a[href*='/annunci/'], a[href*='/vi/'], script[type='application/ld+json']", timeout=wait_ms)
+            return True
+        except PWTimeout:
+            return False
+    except Exception:
+        return False
+
+# ---------------- Esecuzione singola ricerca ----------------
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
 
-    # primo tentativo: URL diretto
-    blocked = False
+    # 1) prova URL diretto
     try:
         page.goto(target, wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
         try: page.wait_for_load_state("networkidle", timeout=12000)
         except PWTimeout: pass
         accept_cookies_if_present(page); humanize(page)
-        blocked = access_denied(page)
     except Exception:
-        blocked = True
-
-    # fallback: flusso “umano” dalla home
-    if blocked:
+        # 2) fallback: user-flow
         q = query_from_url(target) or cfg.get("nome_ricerca")
-        print(f"[FLOW] Access Denied rilevato → simulo ricerca per '{q}'")
+        print(f"[FLOW] Problema accesso diretto → simulo ricerca per '{q}'")
         if not simulate_search_flow(page, q):
             sp = os.path.join(BASE_DIR, f"errore_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
             hp = os.path.join(BASE_DIR, f"dump_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
@@ -300,10 +354,24 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
             try:
                 with open(hp,"w",encoding="utf-8") as f: f.write(page.content())
             except Exception: pass
-            print(f"[{nome}] Bloccato anche con search flow – screenshot: {sp} – dump: {hp}")
+            print(f"[{nome}] Fallito anche search flow – screenshot: {sp} – dump: {hp}")
             return []
 
-    ads = collect_ads(page, min_cards=12, loops=14, pause_ms=1000)
+    # 3) estrazione: DOM locator
+    ads_dom = collect_ads_dom(page, min_cards=12, loops=14, pause_ms=900)
+
+    # 4) fallback strutturato se DOM scarso
+    ads_struct = []
+    if len(ads_dom) < 5:  # soglia euristica
+        ads_struct = collect_ads_structured(page)
+
+    # unisci risultati
+    seen = {}
+    for lst in (ads_dom, ads_struct):
+        for a in lst:
+            seen.setdefault(a["link"], a)
+    ads = list(seen.values())
+
     if not ads:
         sp = os.path.join(BASE_DIR, f"errore_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
         hp = os.path.join(BASE_DIR, f"dump_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
@@ -315,6 +383,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         print(f"[{nome}] Nessuna card – screenshot: {sp} – dump: {hp}")
         return []
 
+    # Filtri + dedup + salvataggio cronologia
     prev = carica_link_precedenti(cfg["file_cronologia"])
     out = []
     for ann in ads:
@@ -330,10 +399,11 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         if ann["link"] in prev: continue
         out.append(ann)
 
-    print(f"[{nome}] Card viste: {len(ads)}; nuove pertinenti: {len(out)}")
+    print(f"[{nome}] Card DOM:{len(ads_dom)} + JSON:{len(ads_struct)} → nuove pertinenti: {len(out)}")
     salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in ads})
     return out
 
+# ---------------- MAIN ----------------
 def main():
     print("[BOOT] Avvio bot (Playwright + Chrome stable headful)…")
     cfgs = carica_configurazione()
@@ -351,20 +421,24 @@ def main():
     }
 
     with sync_playwright() as p:
-        # Chrome stabile (installato via apt nel workflow) + headful (con Xvfb)
+        # Chrome stabile headful (in Actions usiamo xvfb-run)
         browser = p.chromium.launch(
             channel="chrome",
             headless=False,
             args=["--lang=it-IT","--disable-blink-features=AutomationControlled","--disable-dev-shm-usage"]
         )
-        context = browser.new_context(locale="it-IT", timezone_id="Europe/Rome",
-                                      user_agent=UA, viewport={"width":1920,"height":1080})
+        context = browser.new_context(
+            locale="it-IT",
+            timezone_id="Europe/Rome",
+            user_agent=UA,
+            viewport={"width":1920,"height":1080},
+        )
         context.set_extra_http_headers(extra_headers)
         context.add_init_script(STEALTH_JS)
 
         page = context.new_page()
 
-        # warm-up + cookie
+        # Warm-up + cookie
         try:
             page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
             try: page.wait_for_load_state("networkidle", timeout=8000)
