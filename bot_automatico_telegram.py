@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) – V4.5 (Fix Import)
+Subito.it monitor — Playwright headful (Chrome) – V4.6 (Fix Import)
 Patch critiche:
-- ✅ FIX IMPORT: Corretto l'import di `stealth_sync` secondo l'ultima versione della libreria.
+- ✅ FIX IMPORT: Corretto l'import e la chiamata a `stealth` secondo l'ultima versione della libreria.
 - ✅ MODALITÀ STEALTH: Integrazione della libreria `playwright-stealth` per bypassare i sistemi anti-bot avanzati.
 - ✅ ATTESA INTELLIGENTE: Lo script attende obbligatoriamente la comparsa del contenitore degli annunci.
 - ✅ GESTIONE BLOCCHI: Se la pagina non contiene annunci, la ricerca viene interrotta con un errore chiaro e uno screenshot.
@@ -13,7 +13,7 @@ import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs, urljoin
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
-from playwright_stealth.stealth import stealth_sync # <-- Corretto l'import per la nuova versione della libreria
+from playwright_stealth.stealth import stealth # <-- Import corretto per la versione più recente
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
@@ -435,7 +435,7 @@ def main():
         page = context.new_page()
 
         print("[STEALTH] Applico le patch anti-rilevamento...")
-        stealth_sync(page)
+        stealth(page) # <-- Chiamata alla funzione aggiornata
         
         nuovi = {}
         for cfg in cfgs:
