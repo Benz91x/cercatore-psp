@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) – V4.2 (Corretto)
+Subito.it monitor — Playwright headful (Chrome) – V4.3 (Anti-blocco)
 Patch critiche:
+- ✅ ATTESA INTELLIGENTE: Lo script ora attende obbligatoriamente la comparsa del contenitore degli annunci.
+- ✅ GESTIONE BLOCCHI: Se la pagina non contiene annunci (probabile blocco/CAPTCHA), la ricerca viene interrotta con un errore chiaro e uno screenshot, evitando inutili fallback.
+- ✅ Pause e Timeout Aumentati: Per simulare un comportamento più umano e dare al sito il tempo di caricare.
 - ✅ Rilevamento Spedizione (DOM): Aggiunti selettori specifici per badge/icone di spedizione.
-- ✅ Enrichment Sempre Attivo: La verifica sulla pagina di dettaglio ora si attiva sempre per gli annunci senza flag di spedizione, non solo se il totale è zero.
+- ✅ Enrichment Sempre Attivo: La verifica sulla pagina di dettaglio ora si attiva sempre per gli annunci senza flag di spedizione.
 - ✅ Verifica Dettaglio Migliorata: L'enrichment cerca elementi concreti come il pulsante "Acquista" o box dedicati.
-- ✅ Impostazione esplicita del flag `spedizione=True` in TUTTE le pipeline (DOM, JSON/Next, Network, Mobile)
-- ✅ Network tap più tollerante (prova a parsare qualsiasi risposta che sembri JSON)
-- ✅ Pattern URL ampliati: "/ann", "/ad", "/vi", "/annuncio", "/annunci/"
-- ✅ Dedup: salva **solo** i link effettivamente notificati, così non si “bruciano” i non conformi
 
 Progettato per GitHub Actions Ubuntu 24.04 con Chrome stabile headful via Xvfb.
 """
@@ -141,12 +140,6 @@ if (oq) {
   window.navigator.permissions.query = p =>
     (p && p.name === 'notifications') ? Promise.resolve({state:'granted'}) : oq(p);
 }
-const gp = WebGLRenderingContext.prototype.getParameter;
-WebGLRenderingContext.prototype.getParameter = function(param){
-  if (param===37445) return 'Intel Inc.';
-  if (param===37446) return 'Intel Iris OpenGL Engine';
-  return gp.apply(this, arguments);
-};
 """
 
 # ---- URL patterns
@@ -167,14 +160,14 @@ def accept_cookies_if_present(page: Page):
     try:
         for lab in ("Accetta", "Accetta tutto", "Accetta e chiudi", "Acconsenti", "Accept all"):
             btn = page.locator(f"button:has-text('{lab}')").first
-            if btn and btn.is_visible(timeout=2000):
-                btn.click(timeout=3000); time.sleep(0.2); print(f"[COOKIE] Accettato (root:{lab})"); return
+            if btn and btn.is_visible(timeout=3000):
+                btn.click(timeout=3000); time.sleep(0.5); print(f"[COOKIE] Accettato (root:{lab})"); return
     except Exception: pass
     try:
         for frame in page.frames:
             try:
                 fbtn = frame.locator("button[data-testid='uc-accept-all-button']").first
-                if fbtn and fbtn.is_visible(timeout=2000):
+                if fbtn and fbtn.is_visible(timeout=3000):
                     fbtn.click(timeout=3000); print("[COOKIE] Accettato (iframe)"); return
             except Exception: continue
     except Exception: pass
@@ -187,19 +180,10 @@ def humanize(page: Page):
         w, h = 1280, 800
     x = random.randint(50, min(400, w-50)); y = random.randint(50, min(300, h-50))
     try:
-        page.mouse.move(x,y); page.wait_for_timeout(random.randint(120,300))
-        page.evaluate("window.scrollBy(0, Math.max(600, window.innerHeight));")
-        page.wait_for_timeout(random.randint(150,350))
+        page.mouse.move(x,y); page.wait_for_timeout(random.randint(200,400))
+        page.evaluate("window.scrollBy(0, Math.max(800, window.innerHeight));")
+        page.wait_for_timeout(random.randint(250,550))
     except Exception: pass
-
-
-def query_from_url(url: str) -> Optional[str]:
-    try:
-        qs = parse_qs(urlparse(url).query)
-        qv = qs.get("q", [])
-        return qv[0] if qv else None
-    except Exception:
-        return None
 
 # ---------------- Shipping helpers ----------------
 
@@ -224,14 +208,14 @@ def dict_has_shipping(d: Dict) -> bool:
 
 # ---------------- Estrattori ----------------
 
-def collect_ads_dom(page: Page, min_cards=1, loops=18, pause_ms=700) -> List[Dict]:
+def collect_ads_dom(page: Page, loops=18, pause_ms=700) -> List[Dict]:
     seen = {}
     for _ in range(loops):
-        # Selettore più specifico per i "contenitori" degli annunci
         loc = page.locator("div[class*='items-container'] > div[class*='item-card'], div[data-testid*='ad-card']")
         
         try: count = min(loc.count(), 500)
         except Exception: count = 0
+        if count == 0: break # Se non ci sono card, inutile scrollare
         
         for i in range(count):
             card = loc.nth(i)
@@ -252,20 +236,18 @@ def collect_ads_dom(page: Page, min_cards=1, loops=18, pause_ms=700) -> List[Dic
             try: prezzo = (card.locator("[data-testid='ad-price'], p[class*='price']").first.text_content() or "").strip()
             except Exception: pass
 
-            # Rilevamento Spedizione: cerca badge, icone o testo specifico
             sped = False
             try:
                 card_text = (card.inner_text() or "").lower()
                 if any(kw in card_text for kw in SHIPPING_TEXT_KWS):
                     sped = True
-                # Cerca elementi specifici che indicano la spedizione (più affidabile del testo)
                 if not sped and card.locator("[data-testid*='tuttosubito-badge'], [class*='shipping-badge']").count() > 0:
                     sped = True
             except Exception: pass
             
             seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D", "spedizione": sped})
         
-        if len(seen) >= min_cards: break
+        if len(seen) >= 20: break # Se abbiamo già un buon numero di annunci, fermiamoci
         page.evaluate("window.scrollBy(0, Math.max(1400, window.innerHeight));")
         page.wait_for_timeout(pause_ms)
         
@@ -273,6 +255,7 @@ def collect_ads_dom(page: Page, min_cards=1, loops=18, pause_ms=700) -> List[Dic
 
 
 def collect_ads_structured(page: Page) -> List[Dict]:
+    # ... (questa funzione rimane invariata)
     def _maybe_price(obj: Any) -> Optional[str]:
         if isinstance(obj, dict):
             for k in ("price","priceLabel","price_value","priceValue","prezzo"):
@@ -307,50 +290,37 @@ def collect_ads_structured(page: Page) -> List[Dict]:
             for v in obj.values(): _walk_collect(v, out)
         elif isinstance(obj, list):
             for it in obj: _walk_collect(it, out)
-
     out: Dict[str, Dict] = {}
-    # JSON-LD
     try:
         els = page.locator("script[type='application/ld+json']")
         for i in range(min(els.count(), 80)):
             try:
                 raw = els.nth(i).text_content()
                 if not raw: continue
-                data = json.loads(raw)
-                _walk_collect(data, out)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    # __NEXT_DATA__
+                data = json.loads(raw); _walk_collect(data, out)
+            except Exception: continue
+    except Exception: pass
     try:
         nd = page.locator("script#__NEXT_DATA__")
         if nd and nd.count() > 0:
             raw = nd.first.text_content()
             if raw:
                 data = json.loads(raw); _walk_collect(data, out)
-    except Exception:
-        pass
+    except Exception: pass
     return list(out.values())
 
-# ------------ GLOBAL NETWORK TAP (più tollerante) ------------
+# ------------ GLOBAL NETWORK TAP ------------
 NETWORK_BUF: Dict[str, Dict] = {}
 
-
 def network_tap_on_response(resp: Response):
-    try:
-        body = resp.text()
-    except Exception:
-        return
-    if not body or len(body) < 80:
-        return
+    # ... (questa funzione rimane invariata)
+    try: body = resp.text()
+    except Exception: return
+    if not body or len(body) < 80: return
     s = body.lstrip()
-    if not s or s[0] not in "[{":
-        return
-    try:
-        data = json.loads(s)
-    except Exception:
-        return
+    if not s or s[0] not in "[{": return
+    try: data = json.loads(s)
+    except Exception: return
     def _maybe_price(obj: Any) -> Optional[str]:
         if isinstance(obj, dict):
             for k in ("price","priceLabel","price_value","priceValue","prezzo"):
@@ -373,25 +343,9 @@ def network_tap_on_response(resp: Response):
             for it in obj: _walk_collect(it, out)
     _walk_collect(data, NETWORK_BUF)
 
-# ------------ Regex fallback su HTML ------------
-AD_REGEX = re.compile(r"https?://(?:www\.)?subito\.it/[^\s\"'<>]*/(?:ann|vi|ad)[^\s\"'<>]+", re.IGNORECASE)
-REL_REGEX = re.compile(r"['\"](/(?:ann|vi|ad)[^'\"<>]+)['\"]", re.IGNORECASE)
-
-
-def collect_ads_regex(page: Page) -> List[Dict]:
-    html = page.content()
-    candidates = set(AD_REGEX.findall(html))
-    for m in REL_REGEX.findall(html):
-        candidates.add(urljoin("https://www.subito.it", m))
-    out = []
-    for link in candidates:
-        if is_ad_href(link):
-            out.append({"link": link, "titolo": "(da regex)", "prezzo": "N/D", "spedizione": False})
-    return out
-
 # ------------ Enrichment: visita alcuni dettagli per riconoscere la spedizione ------------
 
-def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8, per_timeout: int = 7000) -> None:
+def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8, per_timeout: int = 8000) -> None:
     todo = [a for a in ads if not a.get("spedizione")]
     if not todo: return
     
@@ -403,10 +357,9 @@ def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8,
         if not url: continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=per_timeout)
-            try: page.wait_for_load_state("networkidle", timeout=2500)
+            try: page.wait_for_load_state("networkidle", timeout=3000)
             except PWTimeout: pass
             
-            # Cerca indicatori specifici e affidabili sulla pagina di dettaglio
             buy_button = page.locator("button:has-text('Acquista')").first
             shipping_info = page.locator("div:has-text('Spedizione disponibile'), div[data-testid*='shipping-available']").first
             
@@ -414,136 +367,69 @@ def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8,
                 a["spedizione"] = True
                 continue
 
-            # Fallback: cerca keyword nel contenuto se i selettori falliscono
             txt = (page.content() or "").lower()
             if any(kw in txt for kw in SHIPPING_TEXT_KWS):
                 a["spedizione"] = True
         except Exception:
             continue
 
-# ------------ Mobile/RSS fallback ------------
-
-def try_mobile_and_rss(page: Page, query: str) -> List[Dict]:
-    results: Dict[str, Dict] = {}
-    # Mobile
-    try:
-        murl = f"https://m.subito.it/annunci-italia/?q={query}"
-        page.goto(murl, wait_until="domcontentloaded", timeout=20000, referer="https://m.subito.it/")
-        try: page.wait_for_selector("a[href*='/ann']", timeout=5000)
-        except PWTimeout: pass
-        for a in page.query_selector_all("a[href*='/ann']"):
-            href = a.get_attribute("href")
-            if not is_ad_href(href): continue
-            titolo = (a.text_content() or "").strip() or "(mobile)"
-            sped = False
-            try:
-                if "spedizione" in (a.inner_text() or "").lower():
-                    sped = True
-            except Exception: pass
-            results.setdefault(href, {"link": href, "titolo": titolo, "prezzo": "N/D", "spedizione": sped})
-    except Exception:
-        pass
-    # RSS (best-effort)
-    try:
-        rss = f"https://www.subito.it/annunci-italia/vendita/?q={query}&format=rss"
-        page.goto(rss, wait_until="domcontentloaded", timeout=15000, referer="https://www.subito.it/")
-        xml = page.content()
-        for link in AD_REGEX.findall(xml):
-            results.setdefault(link, {"link": link, "titolo": "(rss)", "prezzo": "N/D", "spedizione": False})
-    except Exception:
-        pass
-    return list(results.values())
-
-# ------------ Flow di ricerca ------------
-
-def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
-    try:
-        page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
-        try: page.wait_for_load_state("networkidle", timeout=8000)
-        except PWTimeout: pass
-        accept_cookies_if_present(page); humanize(page)
-        selectors = [
-            "input[placeholder*='Cosa cerchi']", "input[name='q']",
-            "input[type='search']", "input[aria-label*='cerca' i]"
-        ]
-        box = None
-        for sel in selectors:
-            try:
-                loc = page.locator(sel).first
-                if loc and loc.is_visible():
-                    box = loc; break
-            except Exception: continue
-        if not box: print("[FLOW] Campo di ricerca non trovato"); return False
-        box.click()
-        for ch in query:
-            box.type(ch, delay=random.randint(25, 60))
-        page.keyboard.press("Enter")
-        try: page.wait_for_load_state("domcontentloaded", timeout=12000)
-        except PWTimeout: pass
-        try:
-            page.wait_for_selector("a[href*='/ann'], script[type='application/ld+json']", timeout=wait_ms)
-            return True
-        except PWTimeout:
-            return False
-    except Exception:
-        return False
-
 # ------------ Esecuzione singola ricerca ------------
 
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
-    NETWORK_BUF.clear() # Pulisci il buffer di rete per ogni nuova ricerca
+    NETWORK_BUF.clear()
 
-    # 1) URL diretto
+    # 1) Navigazione e attesa intelligente del contenuto
     try:
-        page.goto(target, wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
-        try: page.wait_for_load_state("networkidle", timeout=12000)
-        except PWTimeout: pass
-        accept_cookies_if_present(page); humanize(page)
-    except Exception:
-        q = query_from_url(target) or cfg.get("nome_ricerca")
-        print(f"[FLOW] Problema accesso diretto → simulo ricerca per '{q}'")
-        if not simulate_search_flow(page, q):
-            print(f"[{nome}] Fallito anche search flow di base → provo mobile/RSS")
-            extra = try_mobile_and_rss(page, q)
-            return extra
-
-    # 2) Prima raccolta: DOM + Regex + Structured
-    dom_ads   = collect_ads_dom(page, min_cards=1, loops=18, pause_ms=600)
-    regex_ads = collect_ads_regex(page)
-    struct_ads= collect_ads_structured(page)
-
-    # 3) Se ancora pochi risultati, dai tempo al network (TAP globale)
-    page.wait_for_timeout(2000)
-    net_ads = list(NETWORK_BUF.values())
-
-    # 4) Merge con priorità network > DOM > JSON > regex
-    merged: Dict[str, Dict] = {}
-    for lst in (net_ads, dom_ads, struct_ads, regex_ads):
-        for a in lst:
-            merged.setdefault(a["link"], a)
-    ads = list(merged.values())
-
-    if not ads:
-        q = query_from_url(target) or cfg.get("nome_ricerca") or ""
-        print(f"[{nome}] 0 risultati → provo mobile/RSS come fallback finale")
-        ads = try_mobile_and_rss(page, q)
-
-    if not ads:
-        sp = os.path.join(BASE_DIR, f"errore_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
-        hp = os.path.join(BASE_DIR, f"dump_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
+        page.goto(target, wait_until="domcontentloaded", timeout=30000)
+        accept_cookies_if_present(page)
+        
+        # ***** NUOVA LOGICA ANTI-BLOCCO *****
+        # Attende che il contenitore degli annunci sia visibile. Se non appare, la pagina è bloccata.
+        print(f"[{nome}] Attendo il caricamento degli annunci...")
+        page.wait_for_selector(
+            "div[class*='items-container']", 
+            timeout=25000
+        )
+        print(f"[{nome}] Pagina caricata correttamente, procedo con l'estrazione.")
+        
+    except PWTimeout:
+        # Se il selettore non viene trovato, significa che la pagina è vuota o bloccata.
+        sp = os.path.join(BASE_DIR, f"errore_blocco_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
+        hp = os.path.join(BASE_DIR, f"dump_blocco_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
         try: page.screenshot(path=sp, full_page=True)
         except Exception: pass
         try: 
             with open(hp,"w",encoding="utf-8") as f: f.write(page.content())
         except Exception: pass
-        print(f"[{nome}] Nessuna card – screenshot: {sp} – dump: {hp}")
+        print(f"[{nome}] ERRORE: La pagina dei risultati non contiene annunci (probabile blocco/CAPTCHA). Screenshot salvato: {sp}")
+        return [] # Interrompe l'esecuzione per questa ricerca
+    except Exception as e:
+        print(f"[{nome}] Errore imprevisto durante la navigazione: {e}")
         return []
 
-    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} REGEX:{len(regex_ads)} → tot unici: {len(ads)}")
+    humanize(page) # Aggiunge un po' di "umanità" solo dopo aver caricato la pagina
 
-    # Enrichment: controlla sempre qualche dettaglio per confermare la spedizione
+    # 2) Raccolta dati (ora che siamo sicuri che la pagina è valida)
+    dom_ads   = collect_ads_dom(page)
+    struct_ads= collect_ads_structured(page)
+    page.wait_for_timeout(2000)
+    net_ads = list(NETWORK_BUF.values())
+
+    merged: Dict[str, Dict] = {}
+    for lst in (net_ads, dom_ads, struct_ads):
+        for a in lst:
+            merged.setdefault(a["link"], a)
+    ads = list(merged.values())
+
+    if not ads:
+        print(f"[{nome}] Nessun annuncio trovato nonostante la pagina sia stata caricata.")
+        return []
+
+    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} → tot unici: {len(ads)}")
+
+    # 3) Enrichment
     before = sum(1 for a in ads if a.get("spedizione"))
     enrich_shipping_from_detail(page, ads, max_check=8)
     after = sum(1 for a in ads if a.get("spedizione"))
@@ -553,7 +439,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         print(f"[{nome}] Spedizione True: {after} (Enrichment non ha trovato altro)")
 
 
-    # Filtri + dedup + salvataggio cronologia (solo spedizione)
+    # 4) Filtri e output
     prev = carica_link_precedenti(cfg["file_cronologia"])
     out = []
     scartati_per_filtri = 0
@@ -587,7 +473,6 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
     print(f"[{nome}] Trovati {sum(1 for a in ads if a.get('spedizione'))} con spedizione. Scartati per filtri/budget: {scartati_per_filtri}. Già visti: {len(ads) - len(out) - scartati_per_filtri}.")
     print(f"[{nome}] Nuovi pertinenti da notificare: {len(out)}")
     
-    # segna come visti solo gli annunci inviati (non quelli scartati)
     if out:
         salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
     return out
@@ -599,17 +484,9 @@ def main():
     cfgs = carica_configurazione()
     print("[CFG] Attive:", [c["nome_ricerca"] for c in cfgs])
 
-    chrome_major = random.choice([121,122,123])
+    chrome_major = random.choice([123,124,125])
     UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_major}.0.0.0 Safari/537.36"
-    extra_headers = {
-        "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language":"it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Upgrade-Insecure-Requests":"1",
-        "Sec-Fetch-Dest":"document","Sec-Fetch-Mode":"navigate","Sec-Fetch-Site":"none","Sec-Fetch-User":"?1",
-        "sec-ch-ua": f"\"Chromium\";v=\"{chrome_major}\", \"Not-A.Brand\";v=\"99\"",
-        "sec-ch-ua-mobile":"?0","sec-ch-ua-platform":"\"Windows\"",
-    }
-
+    
     with sync_playwright() as p:
         browser = p.chromium.launch(
             channel="chrome",
@@ -622,28 +499,15 @@ def main():
             user_agent=UA,
             viewport={"width":1920,"height":1080},
         )
-        context.set_extra_http_headers(extra_headers)
         context.add_init_script(STEALTH_JS)
-
-        # **GLOBAL NETWORK TAP** — prima di QUALSIASI navigazione
         context.on("response", network_tap_on_response)
-
         page = context.new_page()
-
-        # Warm-up + cookie
-        try:
-            page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
-            try: page.wait_for_load_state("networkidle", timeout=8000)
-            except PWTimeout: pass
-            accept_cookies_if_present(page); humanize(page)
-        except Exception as e:
-            print(f"[BOOT] Warm-up fallito: {e}")
 
         nuovi = {}
         for cfg in cfgs:
             res = run_search(page, cfg)
             if res: nuovi[cfg["nome_ricerca"]] = res
-            time.sleep(random.randint(2, 5)) # Pausa tra una ricerca e l'altra
+            time.sleep(random.randint(4, 8)) # Pausa più lunga tra una ricerca e l'altra
 
         context.close(); browser.close()
 
@@ -651,7 +515,7 @@ def main():
         msg = "<b>📢 Nuove offerte trovate (con 🚚 Spedizione disponibile)!</b>\n\n"
         for categoria, lista in nuovi.items():
             msg += f"<b>--- {categoria.upper()} ---</b>\n"
-            for a in sorted(lista, key=lambda x: x.get('titolo', '')): # Ordina per titolo
+            for a in sorted(lista, key=lambda x: x.get('titolo', '')):
                 msg += f"{a['titolo']} — <b>{a['prezzo']}</b> 🚚\n<a href='{a['link']}'>Vedi annuncio</a>\n\n"
         invia_notifica_telegram(msg)
     else:
