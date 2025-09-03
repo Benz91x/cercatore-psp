@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor â€" Playwright headful (Chrome) â€" V4.7 (Fix Import)
+Subito.it monitor - Playwright headful (Chrome) - V4.7 (Fix Import)
 Patch critiche:
-- âœ… FIX IMPORT: Corretto l'import e la chiamata a `stealth` secondo l'ultima versione della libreria.
-- âœ… MODALITÃ€ STEALTH: Integrazione della libreria `playwright-stealth` per bypassare i sistemi anti-bot avanzati.
-- âœ… ATTESA INTELLIGENTE: Lo script attende obbligatoriamente la comparsa del contenitore degli annunci.
-- âœ… GESTIONE BLOCCHI: Se la pagina non contiene annunci, la ricerca viene interrotta con un errore chiaro e uno screenshot.
+- FIX IMPORT: Corretto l'import e la chiamata a `stealth` secondo l'ultima versione della libreria.
+- MODALITA STEALTH: Integrazione della libreria `playwright-stealth` per bypassare i sistemi anti-bot avanzati.
+- ATTESA INTELLIGENTE: Lo script attende obbligatoriamente la comparsa del contenitore degli annunci.
+- GESTIONE BLOCCHI: Se la pagina non contiene annunci, la ricerca viene interrotta con un errore chiaro e uno screenshot.
 
 Progettato per GitHub Actions Ubuntu 24.04 con Chrome stabile headful via Xvfb.
 """
@@ -80,10 +80,10 @@ def carica_configurazione() -> List[Dict]:
                         print(f"[CFG] YAML caricato: {yp}")
                         return [_ensure_abs_cronofile(dict(e)) for e in ricerche if isinstance(e, dict)]
                     else:
-                        print(f"[CFG] YAML vuoto: {yp} â†' uso default")
+                        print(f"[CFG] YAML vuoto: {yp} -> uso default")
                         break
                 except Exception as ex:
-                    print(f"[CFG] YAML errore: {ex} â†' uso default")
+                    print(f"[CFG] YAML errore: {ex} -> uso default")
                     break
     else:
         print("[CFG] pyyaml non presente: uso default")
@@ -176,7 +176,7 @@ def dict_has_shipping(d: Dict) -> bool:
             if any(s in kl for s in ["ship","spediz","deliver","tutel"]):
                 if isinstance(v, bool) and v: return True
                 if isinstance(v, (int, float)) and v == 1: return True
-                if isinstance(v, str) and v.strip().lower() in ("true","si","sÃ¬","yes","available","disponibile","on","1"): return True
+                if isinstance(v, str) and v.strip().lower() in ("true","si","si","yes","available","disponibile","on","1"): return True
                 if isinstance(v, (list, tuple)) and len(v) > 0: return True
                 if isinstance(v, dict) and dict_has_shipping(v): return True
     except Exception:
@@ -237,7 +237,7 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 if k in obj and obj[k]: return str(obj[k])
             if obj.get("@type") in ("Offer","AggregateOffer"):
                 p = obj.get("price") or obj.get("lowPrice");
-                if p: return f"{p} â‚¬"
+                if p: return f"{p} EUR"
         return None
     def _ad_from_dict(d: Dict) -> Optional[Dict]:
         link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url") or d.get("webUrl")
@@ -383,7 +383,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         print(f"[{nome}] Nessun annuncio trovato nonostante la pagina sia stata caricata.")
         return []
 
-    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} → tot unici: {len(ads)}")
+    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} -> tot unici: {len(ads)}")
 
     before = sum(1 for a in ads if a.get("spedizione"))
     enrich_shipping_from_detail(page, ads, max_check=8)
@@ -402,7 +402,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         title_l = (ann.get("titolo") or "").lower()
         price_val = None
         price_txt = ann.get("prezzo") or ""
-        if "â‚¬" in price_txt:
+        if "EUR" in price_txt or "euro" in price_txt.lower():
             m = re.findall(r"\d+[.,]?\d*", price_txt.replace(",", "."))
             price_val = float(m[0]) if m else None
         if any(kw in title_l for kw in cfg.get("keyword_da_escludere", [])):
@@ -418,7 +418,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         if ann["link"] in prev: continue
         out.append(ann)
 
-    print(f"[{nome}] Trovati {sum(1 for a in ads if a.get('spedizione'))} con spedizione. Scartati per filtri/budget: {scartati_per_filtri}. GiÃ  visti: {len(ads) - len(out) - scartati_per_filtri}.")
+    print(f"[{nome}] Trovati {sum(1 for a in ads if a.get('spedizione'))} con spedizione. Scartati per filtri/budget: {scartati_per_filtri}. Gia visti: {len(ads) - len(out) - scartati_per_filtri}.")
     print(f"[{nome}] Nuovi pertinenti da notificare: {len(out)}")
     
     if out:
@@ -426,7 +426,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
     return out
 
 def main():
-    print("[BOOT] Avvio bot (Playwright + Chrome stable headful)â€¦")
+    print("[BOOT] Avvio bot (Playwright + Chrome stable headful)...")
     cfgs = carica_configurazione()
     print("[CFG] Attive:", [c["nome_ricerca"] for c in cfgs])
 
@@ -459,11 +459,11 @@ def main():
         context.close(); browser.close()
 
     if nuovi:
-        msg = "<b>ðŸ"¢ Nuove offerte trovate (con ðŸšš Spedizione disponibile)!</b>\n\n"
+        msg = "<b>Nuove offerte trovate (con Spedizione disponibile)!</b>\n\n"
         for categoria, lista in nuovi.items():
             msg += f"<b>--- {categoria.upper()} ---</b>\n"
             for a in sorted(lista, key=lambda x: x.get('titolo', '')):
-                msg += f"{a['titolo']} â€" <b>{a['prezzo']}</b> ðŸšš\n<a href='{a['link']}'>Vedi annuncio</a>\n\n"
+                msg += f"{a['titolo']} - <b>{a['prezzo']}</b> [SPEDIZIONE]\n<a href='{a['link']}'>Vedi annuncio</a>\n\n"
         invia_notifica_telegram(msg)
     else:
         print("[DONE] Nessun nuovo annuncio in questa esecuzione.")
