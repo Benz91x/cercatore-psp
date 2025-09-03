@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) – V4.6 (Fix Import)
+Subito.it monitor — Playwright headful (Chrome) – V4.7 (Fix Import)
 Patch critiche:
 - ✅ FIX IMPORT: Corretto l'import e la chiamata a `stealth` secondo l'ultima versione della libreria.
 - ✅ MODALITÀ STEALTH: Integrazione della libreria `playwright-stealth` per bypassare i sistemi anti-bot avanzati.
@@ -13,7 +13,7 @@ import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs, urljoin
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
-from playwright_stealth.stealth import stealth # <-- Import corretto per la versione più recente
+from playwright_stealth import stealth # <-- Import corretto per la versione più recente
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
