@@ -13,7 +13,7 @@ import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs, urljoin
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
-from playwright_stealth.sync_api import stealth_sync # <-- ECCO LA RIGA CORRETTA!
+from playwright_stealth import stealth_sync # <-- RIGA CORRETTA!
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
@@ -23,26 +23,25 @@ YAML_CANDIDATES = [
 
 DEFAULT_RICERCHE = [
     {"nome_ricerca":"PSP","url":"https://www.subito.it/annunci-italia/vendita/usato/?q=psp","budget_massimo":120,
-     "keyword_da_includere":["psp","playstation portable","psp 1000","psp 2000","psp 3000","psp street"],
-     "keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco"],
-     "file_cronologia":os.path.join(BASE_DIR,"report_annunci_psp.txt")},
+    "keyword_da_includere":["psp","playstation portable","psp 1000","psp 2000","psp 3000","psp street"],
+    "keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco"],
+    "file_cronologia":os.path.join(BASE_DIR,"report_annunci_psp.txt")},
     {"nome_ricerca":"Switch OLED","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled","budget_massimo":300,
-     "keyword_da_includere":["switch","oled"],"keyword_da_escludere":["riparazione","cerco","non funzionante"],
-     "file_cronologia":os.path.join(BASE_DIR,"report_annunci_switch.txt")},
+    "keyword_da_includere":["switch","oled"],"keyword_da_escludere":["riparazione","cerco","non funzionante"],
+    "file_cronologia":os.path.join(BASE_DIR,"report_annunci_switch.txt")},
     {"nome_ricerca":"PlayStation 5","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5","budget_massimo":600,
-     "keyword_da_includere":["ps5","playstation 5","playstation5","console ps5"],
-     "keyword_da_escludere":["riparazione","cerco","non funzionante","controller","solo pad","cover","base"],
-     "file_cronologia":os.path.join(BASE_DIR,"report_annunci_ps5.txt")},
+    "keyword_da_includere":["ps5","playstation 5","playstation5","console ps5"],
+    "keyword_da_escludere":["riparazione","cerco","non funzionante","controller","solo pad","cover","base"],
+    "file_cronologia":os.path.join(BASE_DIR,"report_annunci_ps5.txt")},
     {"nome_ricerca":"Nintendo 3DS","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds","budget_massimo":250,
-     "keyword_da_includere":["3ds","nintendo 3ds","new 3ds","new3ds","2ds"],
-     "keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco","non funzionante"],
-     "file_cronologia":os.path.join(BASE_DIR,"report_annunci_3ds.txt")},
+    "keyword_da_includere":["3ds","nintendo 3ds","new 3ds","new3ds","2ds"],
+    "keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco","non funzionante"],
+    "file_cronologia":os.path.join(BASE_DIR,"report_annunci_3ds.txt")},
 ]
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ... (tutte le altre funzioni rimangono invariate, non serve copiarle di nuovo se modifichi solo la riga dell'import)
 def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
     if not fname:
@@ -360,7 +359,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         return []
 
     humanize(page)
-    dom_ads   = collect_ads_dom(page)
+    dom_ads    = collect_ads_dom(page)
     struct_ads= collect_ads_structured(page)
     page.wait_for_timeout(2000)
     net_ads = list(NETWORK_BUF.values())
