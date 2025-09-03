@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) v7
-Fix critici:
-- Rilevazione "Spedizione disponibile" ripristinata su TUTTE le pipeline (DOM, JSON/Next, network tap, mobile)
-- Pattern link ampliati ("/ann", "/ad", "/vi", "/annuncio") e regex aggiornate
-- Network tap tollerante: niente filtro su content-type; parse se body inizia con { o [
-- Dedup: si salvano solo i link realmente inviati (con spedizione), per non "bruciare" annunci non conformi
+Subito.it monitor — Playwright headful (Chrome) v8
+Fix osservati sul campo:
+- Filtro "Spedizione disponibile" ripristinato in TUTTE le pipeline (DOM/JSON/Network/Mobile)
+- Pattern URL ampliati: "/ann", "/ad", "/vi", "/annuncio", "/annunci/" (copertura totale)
+- Network tap tollerante (ignora content-type e prova a parsare ogni body che sembra JSON)
+- Enrichment opzionale: per gli annunci senza flag spedizione, visita la pagina di dettaglio (fino a 10) e cerca badge/testi
+- Dedup persistente: salva solo i link notificati (con spedizione), così non "brucia" candidati non conformi
 
 Progettato per GitHub Actions Ubuntu 24.04 con Chrome stabile headful via Xvfb.
 """
@@ -145,8 +146,8 @@ WebGLRenderingContext.prototype.getParameter = function(param){
 };
 """
 
-# Subito usa più varianti di path per i dettagli annuncio
-AD_HREF_PATTERNS = ["/ann", "/vi", "/ad", "/annuncio"]
+# Varianti di path per i dettagli annuncio
+AD_HREF_PATTERNS = ["/ann", "/ad", "/vi", "/annuncio", "/annunci/"]
 ABS_HOSTS = [
     "https://www.subito.it", "http://www.subito.it",
     "https://m.subito.it",   "http://m.subito.it",
@@ -210,6 +211,7 @@ SHIPPING_KEYS = [
     "shipping","spedizione","delivery","deliveryOptions","delivery_available","isShipping",
     "is_shippable","shippable","shippingAvailable","hasShipping","tutelato","isTutelato","is_fbb"
 ]
+SHIPPING_TEXT_KWS = ["spedizione", "sped.", "tutelato", "acquisto tutelato", "consegna"]
 
 
 def dict_has_shipping(d: Dict) -> bool:
@@ -239,11 +241,10 @@ def collect_ads_dom(page: Page, min_cards=1, loops=20, pause_ms=650) -> List[Dic
     seen = {}
     for _ in range(loops):
         loc = page.locator(
-            "a[href*='/ann'], a[href*='/vi/'], a[href*='/ad/'], "
-            "article a[href*='/ann'], [data-testid*='list'] a[href], "
-            "[class*='item-card'] a[href], [data-item-id] a[href]"
+            "a[href*='/ann'], a[href*='/vi/'], a[href*='/ad/'], a[href*='/annuncio'], a[href*='/annunci/'], "
+            "article a[href], [data-testid*='list'] a[href], [class*='item-card'] a[href], [data-item-id] a[href]"
         )
-        try: count = min(loc.count(), 500)
+        try: count = min(loc.count(), 600)
         except Exception: count = 0
         for i in range(count):
             a = loc.nth(i)
@@ -273,7 +274,7 @@ def collect_ads_dom(page: Page, min_cards=1, loops=20, pause_ms=650) -> List[Dic
             sped = False
             try:
                 txt = (a.inner_text() or "").lower()
-                if "spedizione" in txt:
+                if any(kw in txt for kw in SHIPPING_TEXT_KWS):
                     sped = True
             except Exception:
                 pass
@@ -282,7 +283,6 @@ def collect_ads_dom(page: Page, min_cards=1, loops=20, pause_ms=650) -> List[Dic
         page.evaluate("window.scrollBy(0, Math.max(2400, window.innerHeight));")
         page.wait_for_timeout(pause_ms)
     return list(seen.values())
-
 
 
 def collect_ads_structured(page: Page) -> List[Dict]:
@@ -400,8 +400,27 @@ def collect_ads_regex(page: Page) -> List[Dict]:
     candidates = set(AD_REGEX.findall(html))
     for m in REL_REGEX.findall(html):
         candidates.add(urljoin("https://www.subito.it", m))
-    # marcati come senza spedizione → filtrati dopo
     return [{"link": link, "titolo": "(da regex)", "prezzo": "N/D", "spedizione": False} for link in candidates]
+
+# ------------ Enrichment su dettaglio annuncio (opzionale) ------------
+
+def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 10, per_timeout: int = 6000) -> None:
+    """Per gli annunci senza flag spedizione, visita fino a max_check pagine e cerca badge/testi."""
+    todo = [a for a in ads if not a.get("spedizione")]
+    random.shuffle(todo)
+    todo = todo[:max_check]
+    for a in todo:
+        url = a.get("link")
+        if not url: continue
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=per_timeout)
+            try: page.wait_for_load_state("networkidle", timeout=2000)
+            except PWTimeout: pass
+            txt = (page.content() or "").lower()
+            if any(kw in txt for kw in SHIPPING_TEXT_KWS):
+                a["spedizione"] = True
+        except Exception:
+            continue
 
 # ------------ Mobile/RSS fallback ------------
 
@@ -524,12 +543,19 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
 
     print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} REGEX:{len(regex_ads)} → tot unici: {len(ads)}")
 
+    # Enrichment su un sottoinsieme: prova a riconoscere badge spedizione aprendo il dettaglio (max 10)
+    before = sum(1 for a in ads if a.get("spedizione"))
+    if before == 0:
+        enrich_shipping_from_detail(page, ads, max_check=10)
+    after = sum(1 for a in ads if a.get("spedizione"))
+    print(f"[{nome}] Spedizione True: prima={before} dopo={after}")
+
     # Filtri + dedup + salvataggio cronologia – **richiedi spedizione**
     prev = carica_link_precedenti(cfg["file_cronologia"])
     out = []
     for ann in ads:
         if not ann.get("spedizione", False):
-            continue  # scarta tutto ciò che non ha "Spedizione disponibile"
+            continue
         title_l = (ann.get("titolo") or "").lower()
         price_val = None
         price_txt = ann.get("prezzo") or ""
@@ -544,7 +570,6 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         out.append(ann)
 
     print(f"[{nome}] Nuove pertinenti (con spedizione): {len(out)}")
-    # segna come visti solo gli annunci inviati
     salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
     return out
 
