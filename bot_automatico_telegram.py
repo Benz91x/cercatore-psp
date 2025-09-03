@@ -1,35 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor - Playwright headful (Chrome) - V4.9 (Deliver-or-die)
-- TELEGRAM: messaggio di test all'avvio per verificare TOKEN/CHAT_ID e fallire in modo esplicito.
-- SPEDIZIONE: filtro configurabile per ricerca (chiave 'solo_con_spedizione': True/False).
-- MATCH: keyword include/exclude robusto (tokenization + lower + strip).
-- PREZZO: parsing numerico più robusto.
-- LOG: perché non invio? motivazione stampata.
-- FIX: ABS_HOSTS, pattern href; cookie click robusto.
+Subito.it monitor – Playwright headful – V5.2 (Mobile anti-challenge, file-only patch)
+- UA/contesto mobile iPhone per ridurre i challenge.
+- Stealth import robusto + fallback manuale (fix "'module' object is not callable").
+- Retry automatico su m.subito.it se rilevo "captcha"/"verifica".
+- Selettori estesi per layout mobile (li[data-testid='result-list-item']).
+- Cookie accept migliorato (root + iframe UC).
+- Test Telegram all'avvio per separare scraping vs invio.
 """
+
 import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
 
-# Import robusto per playwright-stealth
-try:
-    from playwright_stealth import stealth_sync
-except ImportError:
-    try:
-        from playwright_stealth import stealth as stealth_sync
-    except ImportError:
-        import playwright_stealth
-        stealth_sync = playwright_stealth.stealth_sync
-
+# =============== CONFIG DI BASE (immutata) ===============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
     os.path.join(BASE_DIR, "bot_annunci.yml"),
     os.path.join(BASE_DIR, ".github", "workflows", "bot_annunci.yml"),
 ]
 
-# === DEFAULT CONFIG (ora con 'solo_con_spedizione') ===
 DEFAULT_RICERCHE = [
     {"nome_ricerca":"PSP","url":"https://www.subito.it/annunci-italia/vendita/usato/?q=psp","budget_massimo":120,
      "keyword_da_includere":["psp","playstation portable","psp 1000","psp 2000","psp 3000","psp street"],
@@ -54,9 +45,9 @@ DEFAULT_RICERCHE = [
 ]
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")  # Consigliato impostarlo esplicitamente
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# -------------------- Util --------------------
+# =============== UTILITY ===============
 def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
     if not fname:
@@ -65,7 +56,6 @@ def _ensure_abs_cronofile(entry: Dict) -> Dict:
     if not os.path.isabs(fname):
         fname = os.path.join(BASE_DIR, fname)
     entry["file_cronologia"] = fname
-    # default True se non presente
     entry["solo_con_spedizione"] = bool(entry.get("solo_con_spedizione", True))
     return entry
 
@@ -112,7 +102,7 @@ def salva_link_attuali(path: str, link_set: set):
     except Exception:
         pass
 
-# -------------------- Telegram --------------------
+# =============== TELEGRAM ===============
 def _autodetect_chat_id(token: str) -> Optional[str]:
     try:
         r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10)
@@ -126,7 +116,7 @@ def _autodetect_chat_id(token: str) -> Optional[str]:
         return None
     return None
 
-def invia_notifica_telegram(msg: str, force: bool=False) -> bool:
+def invia_notifica_telegram(msg: str) -> bool:
     token = TELEGRAM_BOT_TOKEN; chat_id = TELEGRAM_CHAT_ID
     if not token:
         print("[TG][ERRORE] Manca TELEGRAM_BOT_TOKEN – impossibile inviare.")
@@ -152,10 +142,10 @@ def invia_notifica_telegram(msg: str, force: bool=False) -> bool:
 def invia_test_telegram():
     ok = invia_notifica_telegram("🤖 Test bot Subito: canale Telegram raggiungibile.")
     if not ok:
-        print("[TG] Test fallito: controlla TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID (hai scritto al bot almeno una volta?).")
+        print("[TG] Test fallito: controlla TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
 
-# -------------------- Scraping --------------------
-AD_HREF_PATTERNS = ["/annunci/", "/annuncio", "/ann/", "/vi/", "/ad/"]  # tolto typo /annuci/
+# =============== ANTI-BOT / NAVIGAZIONE ===============
+AD_HREF_PATTERNS = ["/annunci/", "/annuncio", "/ann/", "/vi/", "/ad/"]
 ABS_HOSTS = ["https://www.subito.it","https://m.subito.it","http://www.subito.it","http://m.subito.it"]
 
 def is_ad_href(href: Optional[str]) -> bool:
@@ -163,13 +153,11 @@ def is_ad_href(href: Optional[str]) -> bool:
         return False
     if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
         return True
-    # link relativo
     if href.startswith("/") and any(p in href for p in AD_HREF_PATTERNS):
         return True
     return False
 
 def accept_cookies_if_present(page: Page):
-    # Clicca sia in root che in iframe UC
     labels = ("Accetta", "Accetta tutto", "Accetta e chiudi", "Acconsenti", "Accept all")
     for lab in labels:
         try:
@@ -192,15 +180,27 @@ def accept_cookies_if_present(page: Page):
     except Exception:
         pass
 
+def _goto_with_challenge_retry(page: Page, url: str, timeout: int = 35000):
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+    txt = (page.content() or "").lower()
+    if any(k in txt for k in ["captcha", "verifica di sicurezza", "verifica che sei un umano", "challenge"]):
+        print("[ANTI-BOT] Rilevata pagina di verifica. Riprovo su m.subito.it…")
+        u = list(urlparse(url))
+        if "subito.it" in u[1] and not u[1].startswith("m."):
+            u[1] = "m.subito.it"
+            mobile = urlunparse(u)
+            page.wait_for_timeout(1200)
+            page.goto(mobile, wait_until="domcontentloaded", timeout=timeout)
+
 def humanize(page: Page):
     try:
-        w = page.viewport_size.get("width", 1280); h = page.viewport_size.get("height", 800)
+        w = page.viewport_size.get("width", 390); h = page.viewport_size.get("height", 844)
     except Exception:
-        w, h = 1280, 800
-    x = random.randint(50, min(400, w-50)); y = random.randint(50, min(300, h-50))
+        w, h = 390, 844
+    x = random.randint(20, min(200, w-20)); y = random.randint(40, min(300, h-20))
     try:
         page.mouse.move(x,y); page.wait_for_timeout(random.randint(200,400))
-        page.evaluate("window.scrollBy(0, Math.max(800, window.innerHeight));")
+        page.evaluate("window.scrollBy(0, Math.max(600, window.innerHeight));")
         page.wait_for_timeout(random.randint(250,550))
     except Exception:
         pass
@@ -221,24 +221,30 @@ def dict_has_shipping(d: Dict) -> bool:
         return False
     return False
 
+# =============== RACCOLTA ANNUNCI ===============
 def collect_ads_dom(page: Page, loops=18, pause_ms=700) -> List[Dict]:
     seen = {}
     for _ in range(loops):
-        loc = page.locator("div[class*='items-container'] div[class*='item-card'], div[data-testid*='ad-card']")
+        loc = page.locator(
+            "div[class*='items-container'] div[class*='item-card'], "
+            "div[data-testid*='ad-card'], "
+            "li[data-testid='result-list-item']"  # layout mobile
+        )
         try:
-            count = min(loc.count(), 500)
+            count = min(loc.count(), 600)
         except Exception:
             count = 0
         if count == 0:
-            page.wait_for_timeout(300)  # dai tempo al mount
+            page.wait_for_timeout(300)
         for i in range(count):
             card = loc.nth(i)
-            link_el = card.locator("a[href*='/ann']").first
+            link_el = card.locator("a[href*='/ann'], a[data-testid='ad-link']").first
             try:
                 href = link_el.get_attribute("href")
             except Exception:
                 href = None
-            if not is_ad_href(href): continue
+            if not is_ad_href(href): 
+                continue
             titolo = ""
             try:
                 titolo = (card.locator("[data-testid='ad-title'], h2, h3").first.text_content() or "").strip()
@@ -273,7 +279,7 @@ def collect_ads_dom(page: Page, loops=18, pause_ms=700) -> List[Dict]:
 def collect_ads_structured(page: Page) -> List[Dict]:
     def _maybe_price(obj: Any) -> Optional[str]:
         if isinstance(obj, dict):
-            for k in ("price","priceLabel","price_value","priceValue","prezzo","amount"):
+            for k in ("price","priceLabel","price_value","priceValue","prezzo","amount","lowPrice"):
                 if k in obj and obj[k]:
                     return str(obj[k])
             if obj.get("@type") in ("Offer","AggregateOffer"):
@@ -337,7 +343,7 @@ def network_tap_on_response(resp: Response):
         return
     def _maybe_price(obj: Any) -> Optional[str]:
         if isinstance(obj, dict):
-            for k in ("price","priceLabel","price_value","priceValue","prezzo","amount"):
+            for k in ("price","priceLabel","price_value","priceValue","prezzo","amount","lowPrice"):
                 if k in obj and obj[k]: return str(obj[k])
         return None
     def _ad_from_dict(d: Dict) -> Optional[Dict]:
@@ -367,12 +373,11 @@ def _match_keywords(title: str, includes: List[str], excludes: List[str]) -> boo
             return False
     if includes:
         return any(_norm_text(kw) in t for kw in includes if kw)
-    return True  # se non specificato includes -> passa
+    return True
 
 def _parse_price_to_float(price_txt: str) -> Optional[float]:
     if not price_txt:
         return None
-    # prendi il primo numero (anche con separatori)
     m = re.search(r"(\d{1,3}(?:[\.\s]\d{3})*|\d+)(?:[,\.\s](\d{2}))?", price_txt.replace("€"," ").replace("EUR"," "))
     if not m:
         return None
@@ -383,17 +388,17 @@ def _parse_price_to_float(price_txt: str) -> Optional[float]:
     except Exception:
         return None
 
-def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8, per_timeout: int = 8000) -> None:
+def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 6, per_timeout: int = 7000) -> None:
     todo = [a for a in ads if not a.get("spedizione")]
     if not todo: return
     random.shuffle(todo)
     print(f"[ENRICH] Verifico fino a {max_check} annunci sulla loro pagina per la spedizione.")
     for a in todo[:max_check]:
-        url = a.get("link"); 
+        url = a.get("link")
         if not url: continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=per_timeout)
-            try: page.wait_for_load_state("networkidle", timeout=3000)
+            try: page.wait_for_load_state("networkidle", timeout=2500)
             except PWTimeout: pass
             buy_button = page.locator("button:has-text('Acquista')").first
             shipping_info = page.locator("div:has-text('Spedizione disponibile'), div[data-testid*='shipping-available']").first
@@ -405,22 +410,25 @@ def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8,
         except Exception:
             continue
 
+# =============== PIPELINE DI RICERCA ===============
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
     NETWORK_BUF.clear()
     try:
-        page.goto(target, wait_until="domcontentloaded", timeout=35000)
+        _goto_with_challenge_retry(page, target, timeout=35000)
         accept_cookies_if_present(page)
-        print(f"[{nome}] Attendo il contenitore degli annunci…")
-        page.wait_for_selector("div[class*='items-container'], div[data-testid*='ad-card']", timeout=25000)
+        page.wait_for_selector(
+            "div[class*='items-container'], div[data-testid*='ad-card'], li[data-testid='result-list-item']",
+            timeout=25000
+        )
         print(f"[{nome}] Pagina caricata, estraggo.")
     except PWTimeout:
         sp = os.path.join(BASE_DIR, f"errore_blocco_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
         hp = os.path.join(BASE_DIR, f"dump_blocco_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
         try: page.screenshot(path=sp, full_page=True)
         except Exception: pass
-        try: 
+        try:
             with open(hp,"w",encoding="utf-8") as f: f.write(page.content())
         except Exception: pass
         print(f"[{nome}] ERRORE: Probabile blocco/CAPTCHA. Screenshot: {sp}")
@@ -432,7 +440,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
     humanize(page)
     dom_ads    = collect_ads_dom(page)
     struct_ads = collect_ads_structured(page)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(1200)
     net_ads = list(NETWORK_BUF.values())
 
     merged: Dict[str, Dict] = {}
@@ -443,13 +451,13 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
     ads = list(merged.values())
 
     if not ads:
-        print(f"[{nome}] Nessun annuncio trovato dopo merge.")
+        print(f"[{nome}] Nessun annuncio trovato dopo merge (possibile challenge invisibile).")
         return []
 
     print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} → unici: {len(ads)}")
 
     before = sum(1 for a in ads if a.get("spedizione"))
-    enrich_shipping_from_detail(page, ads, max_check=8)
+    enrich_shipping_from_detail(page, ads, max_check=6)
     after = sum(1 for a in ads if a.get("spedizione"))
     if after > before:
         print(f"[{nome}] Spedizione True: prima={before} dopo={after} (+enrichment)")
@@ -465,22 +473,14 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         prezzo_txt = ann.get("prezzo") or ""
         price_val = _parse_price_to_float(prezzo_txt)
 
-        # SPEDIZIONE (se richiesto)
         if cfg.get("solo_con_spedizione", True) and not ann.get("spedizione", False):
             scartati_per_filtri += 1; continue
-
-        # KEYWORDS
         if not _match_keywords(title, cfg.get("keyword_da_includere") or [], cfg.get("keyword_da_escludere") or []):
             scartati_per_filtri += 1; continue
-
-        # BUDGET
         if (price_val is not None) and (price_val > cfg.get("budget_massimo", 9e9)):
             scartati_per_filtri += 1; continue
-
-        # NOVITÀ
         if ann["link"] in prev:
             continue
-
         out.append(ann)
 
     tot_sped = sum(1 for a in ads if a.get("spedizione"))
@@ -490,45 +490,92 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
     if out:
         salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
     else:
-        # motivo del mancato invio
         if tot_sped == 0 and cfg.get("solo_con_spedizione", True):
-            print(f"[{nome}] Niente invio perché nessun annuncio con spedizione è passato i filtri. Valuta 'solo_con_spedizione: false'.")
+            print(f"[{nome}] Niente invio perché nessun annuncio con spedizione è passato i filtri.")
         elif scartati_per_filtri > 0:
             print(f"[{nome}] Niente invio: tutti scartati da include/exclude/budget.")
         else:
             print(f"[{nome}] Niente invio: tutti già visti.")
     return out
 
-# -------------------- MAIN --------------------
+# =============== MAIN ===============
 def main():
     print("[BOOT] Avvio bot (Playwright + Chrome headful)…")
     cfgs = carica_configurazione()
     print("[CFG] Attive:", [c["nome_ricerca"] for c in cfgs])
 
-    # Test Telegram subito: separa problemi di invio da scraping
+    # Test Telegram
     invia_test_telegram()
 
     with sync_playwright() as p:
+        # Contesto/UA MOBILE (meno challenge)
+        ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
+
         browser = p.chromium.launch(
             channel="chrome",
             headless=False,
-            args=["--lang=it-IT","--disable-blink-features=AutomationControlled","--disable-dev-shm-usage"]
+            args=[
+                "--lang=it-IT",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage"
+            ]
         )
-        context = browser.new_context(locale="it-IT", timezone_id="Europe/Rome")
+        context = browser.new_context(
+            locale="it-IT",
+            timezone_id="Europe/Rome",
+            user_agent=ua,
+            viewport={"width": 390, "height": 844},
+            device_scale_factor=3,
+            is_mobile=True,
+            has_touch=True
+        )
+
+        # Tappa analytics/ads/fonts (meno fingerprint/rumore)
+        def _router(route):
+            url = route.request.url
+            if any(x in url for x in [".ttf",".woff",".woff2","/gtm.js","/tag/js","/analytics","googletagmanager","doubleclick"]):
+                return route.abort()
+            return route.continue_()
+        context.route("**/*", _router)
+
         context.on("response", network_tap_on_response)
         page = context.new_page()
 
-        print("[STEALTH] Applico patch anti-rilevamento…")
+        # STEALTH robusto + fallback manuale
+        use_stealth = False
         try:
-            stealth_sync(page); print("[STEALTH] Ok")
-        except Exception as e:
-            print(f"[STEALTH] Warning: {e}")
+            from playwright_stealth import stealth_sync as _stealth
+            use_stealth = True
+        except Exception:
+            use_stealth = False
+
+        if use_stealth:
+            try:
+                _stealth(page)
+                print("[STEALTH] Ok (playwright_stealth)")
+            except Exception as e:
+                print(f"[STEALTH] Warning: {e} (uso fallback)")
+                use_stealth = False
+
+        if not use_stealth:
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'languages', {get: () => ['it-IT','it']});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                const origQuery = window.navigator.permissions?.query;
+                if (origQuery) {
+                  window.navigator.permissions.query = (p) =>
+                    p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : origQuery(p);
+                }
+            """)
 
         nuovi = {}
         for cfg in cfgs:
             res = run_search(page, cfg)
             if res: nuovi[cfg["nome_ricerca"]] = res
-            time.sleep(random.randint(5, 10))
+            time.sleep(random.randint(4, 8))
 
         context.close(); browser.close()
 
