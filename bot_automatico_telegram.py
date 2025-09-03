@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) – V4.4 (STEALTH MODE)
+Subito.it monitor — Playwright headful (Chrome) – V4.5 (Fix Import)
 Patch critiche:
+- ✅ FIX IMPORT: Corretto l'import di `stealth_sync` secondo l'ultima versione della libreria.
 - ✅ MODALITÀ STEALTH: Integrazione della libreria `playwright-stealth` per bypassare i sistemi anti-bot avanzati.
 - ✅ ATTESA INTELLIGENTE: Lo script attende obbligatoriamente la comparsa del contenitore degli annunci.
 - ✅ GESTIONE BLOCCHI: Se la pagina non contiene annunci, la ricerca viene interrotta con un errore chiaro e uno screenshot.
-- ✅ Pause e Timeout Aumentati: Per simulare un comportamento più umano e dare al sito il tempo di caricare.
 
 Progettato per GitHub Actions Ubuntu 24.04 con Chrome stabile headful via Xvfb.
 """
@@ -13,7 +13,7 @@ import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs, urljoin
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
-from playwright_stealth import stealth_sync # <-- IMPORTANTE: NUOVO IMPORT
+from playwright_stealth.sync_api import stealth_sync # <-- ECCO LA RIGA CORRETTA!
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
@@ -42,12 +42,7 @@ DEFAULT_RICERCHE = [
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ... tutte le altre funzioni (carica_configurazione, invia_notifica_telegram, etc.) rimangono INVARIATE ...
-# Per brevità, le ometto qui, ma assicurati di avere il file completo dalla versione precedente.
-# Le uniche modifiche sono nelle funzioni run_search e main.
-
-# (Incolla qui tutte le funzioni dalla versione 4.3 che non sono run_search o main)
-# ...
+# ... (tutte le altre funzioni rimangono invariate, non serve copiarle di nuovo se modifichi solo la riga dell'import)
 def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
     if not fname:
@@ -60,7 +55,7 @@ def _ensure_abs_cronofile(entry: Dict) -> Dict:
 
 
 def carica_configurazione() -> List[Dict]:
-    global yaml # Assicurati che yaml sia accessibile se non è già globale
+    global yaml
     try:
         import yaml
     except ImportError:
@@ -127,11 +122,8 @@ def invia_notifica_telegram(msg: str):
     except Exception as e:
         print(f"[TG] Invio fallito: {e}")
 
-STEALTH_JS = r"""
-Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
-"""
 AD_HREF_PATTERNS = ["/annuci/","/annunci/","/annuncio","/ann/","/vi/","/ad/"]
-ABS_HOSTS = ["https://www.subito.it","http://www.subito.it","https://m.subito.it","http://m.subito.it"]
+ABS_HOSTS = ["https://www.subito.it","http://www.subito.it","https://m.subito.it","http.m.subito.it"]
 
 def is_ad_href(href: Optional[str]) -> bool:
     if not href: return False
@@ -337,13 +329,11 @@ def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8,
                 a["spedizione"] = True
         except Exception:
             continue
-# ...
 
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
     NETWORK_BUF.clear()
-
     try:
         page.goto(target, wait_until="domcontentloaded", timeout=35000)
         accept_cookies_if_present(page)
@@ -370,7 +360,6 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         return []
 
     humanize(page)
-
     dom_ads   = collect_ads_dom(page)
     struct_ads= collect_ads_structured(page)
     page.wait_for_timeout(2000)
@@ -442,15 +431,10 @@ def main():
         context = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
-            # User agent e altri header sono gestiti da playwright-stealth
         )
-        # Non serve più context.add_init_script(STEALTH_JS) perché la nuova libreria è più potente
-        
         context.on("response", network_tap_on_response)
         page = context.new_page()
 
-        # ***** NUOVA LOGICA STEALTH *****
-        # Applica il "mantello dell'invisibilità" alla nostra pagina
         print("[STEALTH] Applico le patch anti-rilevamento...")
         stealth_sync(page)
         
