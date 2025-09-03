@@ -383,7 +383,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         print(f"[{nome}] Nessun annuncio trovato nonostante la pagina sia stata caricata.")
         return []
 
-    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} â†' tot unici: {len(ads)}")
+    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} → tot unici: {len(ads)}")
 
     before = sum(1 for a in ads if a.get("spedizione"))
     enrich_shipping_from_detail(page, ads, max_check=8)
