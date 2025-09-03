@@ -1,5 +1,4 @@
 playwright
-pyyaml
-requests
 playwright-stealth
-
+PyYAML
+requests
