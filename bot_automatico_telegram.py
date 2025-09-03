@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) – V4.1
+Subito.it monitor — Playwright headful (Chrome) – V4.2 (Corretto)
 Patch critiche:
+- ✅ Rilevamento Spedizione (DOM): Aggiunti selettori specifici per badge/icone di spedizione.
+- ✅ Enrichment Sempre Attivo: La verifica sulla pagina di dettaglio ora si attiva sempre per gli annunci senza flag di spedizione, non solo se il totale è zero.
+- ✅ Verifica Dettaglio Migliorata: L'enrichment cerca elementi concreti come il pulsante "Acquista" o box dedicati.
 - ✅ Impostazione esplicita del flag `spedizione=True` in TUTTE le pipeline (DOM, JSON/Next, Network, Mobile)
 - ✅ Network tap più tollerante (prova a parsare qualsiasi risposta che sembri JSON)
 - ✅ Pattern URL ampliati: "/ann", "/ad", "/vi", "/annuncio", "/annunci/"
-- ✅ Enrichment opzionale: se nessuna card ha `spedizione=True`, apre fino a 8 dettagli e cerca badge/testo
 - ✅ Dedup: salva **solo** i link effettivamente notificati, così non si “bruciano” i non conformi
 
 Progettato per GitHub Actions Ubuntu 24.04 con Chrome stabile headful via Xvfb.
@@ -19,7 +21,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
     os.path.join(BASE_DIR, "bot_annunci.yml"),
     os.path.join(BASE_DIR, ".github", "workflows", "bot_annunci.yml"),
-    os.path.join(BASE_DIR, ".github", "workfloes", "bot_annunci.yml"),
 ]
 
 DEFAULT_RICERCHE = [
@@ -166,14 +167,14 @@ def accept_cookies_if_present(page: Page):
     try:
         for lab in ("Accetta", "Accetta tutto", "Accetta e chiudi", "Acconsenti", "Accept all"):
             btn = page.locator(f"button:has-text('{lab}')").first
-            if btn and btn.is_visible():
+            if btn and btn.is_visible(timeout=2000):
                 btn.click(timeout=3000); time.sleep(0.2); print(f"[COOKIE] Accettato (root:{lab})"); return
     except Exception: pass
     try:
         for frame in page.frames:
             try:
                 fbtn = frame.locator("button[data-testid='uc-accept-all-button']").first
-                if fbtn and fbtn.is_visible():
+                if fbtn and fbtn.is_visible(timeout=2000):
                     fbtn.click(timeout=3000); print("[COOKIE] Accettato (iframe)"); return
             except Exception: continue
     except Exception: pass
@@ -203,7 +204,7 @@ def query_from_url(url: str) -> Optional[str]:
 # ---------------- Shipping helpers ----------------
 
 SHIPPING_TEXT_KWS = [
-    "spedizione", "sped.", "acquisto tutelato", "tutelato", "consegna"
+    "spedizione", "sped.", "acquisto tutelato", "tutelato", "consegna", "tuttosubito"
 ]
 
 
@@ -212,17 +213,11 @@ def dict_has_shipping(d: Dict) -> bool:
         for k, v in d.items():
             kl = str(k).lower()
             if any(s in kl for s in ["ship","spediz","deliver","tutel"]):
-                if isinstance(v, bool) and v:
-                    return True
-                if isinstance(v, (int, float)) and v == 1:
-                    return True
-                if isinstance(v, str) and v.strip():
-                    if v.strip().lower() in ("true","si","sì","yes","available","disponibile","on","1"):
-                        return True
-                if isinstance(v, (list, tuple)) and len(v) > 0:
-                    return True
-                if isinstance(v, dict) and dict_has_shipping(v):
-                    return True
+                if isinstance(v, bool) and v: return True
+                if isinstance(v, (int, float)) and v == 1: return True
+                if isinstance(v, str) and v.strip().lower() in ("true","si","sì","yes","available","disponibile","on","1"): return True
+                if isinstance(v, (list, tuple)) and len(v) > 0: return True
+                if isinstance(v, dict) and dict_has_shipping(v): return True
     except Exception:
         return False
     return False
@@ -232,47 +227,48 @@ def dict_has_shipping(d: Dict) -> bool:
 def collect_ads_dom(page: Page, min_cards=1, loops=18, pause_ms=700) -> List[Dict]:
     seen = {}
     for _ in range(loops):
-        loc = page.locator(
-            "a[href*='/ann'], a[href*='/vi/'], a[href*='/ad/'], a[href*='/annuncio'], a[href*='/annunci/'], "
-            "a:has(h2), a:has(h3), a:has([data-testid='ad-title'])"
-        )
+        # Selettore più specifico per i "contenitori" degli annunci
+        loc = page.locator("div[class*='items-container'] > div[class*='item-card'], div[data-testid*='ad-card']")
+        
         try: count = min(loc.count(), 500)
         except Exception: count = 0
+        
         for i in range(count):
-            a = loc.nth(i)
-            try: href = a.get_attribute("href")
+            card = loc.nth(i)
+            link_el = card.locator("a[href*='/ann']").first
+            
+            try: href = link_el.get_attribute("href")
             except Exception: href = None
             if not is_ad_href(href): continue
-            titolo = None
-            for sel in ("[data-testid='ad-title']","h2","h3"):
-                try:
-                    t = a.locator(sel).first
-                    if t and t.is_visible():
-                        titolo = (t.text_content() or "").strip()
-                        if titolo: break
-                except Exception: continue
+
+            titolo = ""
+            try: titolo = (card.locator("[data-testid='ad-title'], h2, h3").first.text_content() or "").strip()
+            except Exception: pass
             if not titolo:
-                try: titolo = (a.get_attribute("aria-label") or a.get_attribute("title") or "").strip()
+                try: titolo = (link_el.get_attribute("aria-label") or link_el.get_attribute("title") or "").strip()
                 except Exception: titolo = ""
-            prezzo = None
-            for sel in ("[data-testid='ad-price']", "xpath=.//*[contains(text(),'€')]"):
-                try:
-                    p = a.locator(sel).first
-                    if p and p.is_visible():
-                        prezzo = (p.text_content() or "").strip()
-                        if prezzo: break
-                except Exception: continue
-            # shipping dal testo visibile
+
+            prezzo = ""
+            try: prezzo = (card.locator("[data-testid='ad-price'], p[class*='price']").first.text_content() or "").strip()
+            except Exception: pass
+
+            # Rilevamento Spedizione: cerca badge, icone o testo specifico
             sped = False
             try:
-                txt = (a.inner_text() or "").lower()
-                if any(kw in txt for kw in SHIPPING_TEXT_KWS):
+                card_text = (card.inner_text() or "").lower()
+                if any(kw in card_text for kw in SHIPPING_TEXT_KWS):
+                    sped = True
+                # Cerca elementi specifici che indicano la spedizione (più affidabile del testo)
+                if not sped and card.locator("[data-testid*='tuttosubito-badge'], [class*='shipping-badge']").count() > 0:
                     sped = True
             except Exception: pass
+            
             seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D", "spedizione": sped})
+        
         if len(seen) >= min_cards: break
         page.evaluate("window.scrollBy(0, Math.max(1400, window.innerHeight));")
         page.wait_for_timeout(pause_ms)
+        
     return list(seen.values())
 
 
@@ -395,17 +391,30 @@ def collect_ads_regex(page: Page) -> List[Dict]:
 
 # ------------ Enrichment: visita alcuni dettagli per riconoscere la spedizione ------------
 
-def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8, per_timeout: int = 6000) -> None:
+def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8, per_timeout: int = 7000) -> None:
     todo = [a for a in ads if not a.get("spedizione")]
+    if not todo: return
+    
     random.shuffle(todo)
-    todo = todo[:max_check]
-    for a in todo:
+    print(f"[ENRICH] Verifico fino a {max_check} annunci sulla loro pagina per la spedizione.")
+    
+    for a in todo[:max_check]:
         url = a.get("link");
         if not url: continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=per_timeout)
-            try: page.wait_for_load_state("networkidle", timeout=2000)
+            try: page.wait_for_load_state("networkidle", timeout=2500)
             except PWTimeout: pass
+            
+            # Cerca indicatori specifici e affidabili sulla pagina di dettaglio
+            buy_button = page.locator("button:has-text('Acquista')").first
+            shipping_info = page.locator("div:has-text('Spedizione disponibile'), div[data-testid*='shipping-available']").first
+            
+            if buy_button.is_visible(timeout=500) or shipping_info.is_visible(timeout=500):
+                a["spedizione"] = True
+                continue
+
+            # Fallback: cerca keyword nel contenuto se i selettori falliscono
             txt = (page.content() or "").lower()
             if any(kw in txt for kw in SHIPPING_TEXT_KWS):
                 a["spedizione"] = True
@@ -484,6 +493,7 @@ def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
+    NETWORK_BUF.clear() # Pulisci il buffer di rete per ogni nuova ricerca
 
     # 1) URL diretto
     try:
@@ -505,7 +515,7 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
     struct_ads= collect_ads_structured(page)
 
     # 3) Se ancora pochi risultati, dai tempo al network (TAP globale)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)
     net_ads = list(NETWORK_BUF.values())
 
     # 4) Merge con priorità network > DOM > JSON > regex
@@ -533,35 +543,53 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
 
     print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} REGEX:{len(regex_ads)} → tot unici: {len(ads)}")
 
-    # Enrichment: se nessuna card ha spedizione, controlla qualche dettaglio
+    # Enrichment: controlla sempre qualche dettaglio per confermare la spedizione
     before = sum(1 for a in ads if a.get("spedizione"))
-    if before == 0:
-        enrich_shipping_from_detail(page, ads, max_check=8)
+    enrich_shipping_from_detail(page, ads, max_check=8)
     after = sum(1 for a in ads if a.get("spedizione"))
-    print(f"[{nome}] Spedizione True: prima={before} dopo={after}")
+    if after > before:
+        print(f"[{nome}] Spedizione True: prima={before} dopo={after} (Enrichment efficace)")
+    else:
+        print(f"[{nome}] Spedizione True: {after} (Enrichment non ha trovato altro)")
+
 
     # Filtri + dedup + salvataggio cronologia (solo spedizione)
     prev = carica_link_precedenti(cfg["file_cronologia"])
     out = []
+    scartati_per_filtri = 0
     for ann in ads:
         if not ann.get("spedizione", False):
             continue
+        
         title_l = (ann.get("titolo") or "").lower()
         price_val = None
         price_txt = ann.get("prezzo") or ""
         if "€" in price_txt:
             m = re.findall(r"\d+[.,]?\d*", price_txt.replace(",", "."))
             price_val = float(m[0]) if m else None
-        if any(kw in title_l for kw in cfg.get("keyword_da_escludere", [])): continue
+        
+        if any(kw in title_l for kw in cfg.get("keyword_da_escludere", [])):
+            scartati_per_filtri += 1
+            continue
+        
         inc = cfg.get("keyword_da_includere") or []
-        if inc and not any(kw in title_l for kw in inc): continue
-        if (price_val is not None) and (price_val > cfg.get("budget_massimo", 9e9)): continue
+        if inc and not any(kw in title_l for kw in inc):
+            scartati_per_filtri += 1
+            continue
+            
+        if (price_val is not None) and (price_val > cfg.get("budget_massimo", 9e9)):
+            scartati_per_filtri += 1
+            continue
+
         if ann["link"] in prev: continue
         out.append(ann)
 
-    print(f"[{nome}] Nuove pertinenti (con spedizione): {len(out)}")
+    print(f"[{nome}] Trovati {sum(1 for a in ads if a.get('spedizione'))} con spedizione. Scartati per filtri/budget: {scartati_per_filtri}. Già visti: {len(ads) - len(out) - scartati_per_filtri}.")
+    print(f"[{nome}] Nuovi pertinenti da notificare: {len(out)}")
+    
     # segna come visti solo gli annunci inviati (non quelli scartati)
-    salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
+    if out:
+        salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
     return out
 
 # ---------------- MAIN ----------------
@@ -608,12 +636,14 @@ def main():
             try: page.wait_for_load_state("networkidle", timeout=8000)
             except PWTimeout: pass
             accept_cookies_if_present(page); humanize(page)
-        except Exception: pass
+        except Exception as e:
+            print(f"[BOOT] Warm-up fallito: {e}")
 
         nuovi = {}
         for cfg in cfgs:
             res = run_search(page, cfg)
             if res: nuovi[cfg["nome_ricerca"]] = res
+            time.sleep(random.randint(2, 5)) # Pausa tra una ricerca e l'altra
 
         context.close(); browser.close()
 
@@ -621,7 +651,7 @@ def main():
         msg = "<b>📢 Nuove offerte trovate (con 🚚 Spedizione disponibile)!</b>\n\n"
         for categoria, lista in nuovi.items():
             msg += f"<b>--- {categoria.upper()} ---</b>\n"
-            for a in lista:
+            for a in sorted(lista, key=lambda x: x.get('titolo', '')): # Ordina per titolo
                 msg += f"{a['titolo']} — <b>{a['prezzo']}</b> 🚚\n<a href='{a['link']}'>Vedi annuncio</a>\n\n"
         invia_notifica_telegram(msg)
     else:
