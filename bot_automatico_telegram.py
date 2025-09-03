@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor — Playwright headful (Chrome) v8
-Fix osservati sul campo:
-- Filtro "Spedizione disponibile" ripristinato in TUTTE le pipeline (DOM/JSON/Network/Mobile)
-- Pattern URL ampliati: "/ann", "/ad", "/vi", "/annuncio", "/annunci/" (copertura totale)
-- Network tap tollerante (ignora content-type e prova a parsare ogni body che sembra JSON)
-- Enrichment opzionale: per gli annunci senza flag spedizione, visita la pagina di dettaglio (fino a 10) e cerca badge/testi
-- Dedup persistente: salva solo i link notificati (con spedizione), così non "brucia" candidati non conformi
+Subito.it monitor — Playwright headful (Chrome) – V4.1
+Patch critiche:
+- ✅ Impostazione esplicita del flag `spedizione=True` in TUTTE le pipeline (DOM, JSON/Next, Network, Mobile)
+- ✅ Network tap più tollerante (prova a parsare qualsiasi risposta che sembri JSON)
+- ✅ Pattern URL ampliati: "/ann", "/ad", "/vi", "/annuncio", "/annunci/"
+- ✅ Enrichment opzionale: se nessuna card ha `spedizione=True`, apre fino a 8 dettagli e cerca badge/testo
+- ✅ Dedup: salva **solo** i link effettivamente notificati, così non si “bruciano” i non conformi
 
 Progettato per GitHub Actions Ubuntu 24.04 con Chrome stabile headful via Xvfb.
 """
@@ -24,17 +24,19 @@ YAML_CANDIDATES = [
 
 DEFAULT_RICERCHE = [
     {"nome_ricerca":"PSP","url":"https://www.subito.it/annunci-italia/vendita/usato/?q=psp","budget_massimo":120,
-     "keyword_da_includere":["psp"],"keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco"],
+     "keyword_da_includere":["psp","playstation portable","psp 1000","psp 2000","psp 3000","psp street"],
+     "keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_psp.txt")},
     {"nome_ricerca":"Switch OLED","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=switch+oled","budget_massimo":300,
      "keyword_da_includere":["switch","oled"],"keyword_da_escludere":["riparazione","cerco","non funzionante"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_switch.txt")},
     {"nome_ricerca":"PlayStation 5","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=ps5","budget_massimo":600,
-     "keyword_da_includere":["ps5","playstation 5","playstation5"],
+     "keyword_da_includere":["ps5","playstation 5","playstation5","console ps5"],
      "keyword_da_escludere":["riparazione","cerco","non funzionante","controller","solo pad","cover","base"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_ps5.txt")},
     {"nome_ricerca":"Nintendo 3DS","url":"https://www.subito.it/annunci-italia/vendita/videogiochi/?q=nintendo+3ds","budget_massimo":250,
-     "keyword_da_includere":["3ds","nintendo 3ds"],"keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco","non funzionante"],
+     "keyword_da_includere":["3ds","nintendo 3ds","new 3ds","new3ds","2ds"],
+     "keyword_da_escludere":["solo giochi","solo gioco","solo custodia","riparazione","cerco","non funzionante"],
      "file_cronologia":os.path.join(BASE_DIR,"report_annunci_3ds.txt")},
 ]
 
@@ -146,12 +148,9 @@ WebGLRenderingContext.prototype.getParameter = function(param){
 };
 """
 
-# Varianti di path per i dettagli annuncio
-AD_HREF_PATTERNS = ["/ann", "/ad", "/vi", "/annuncio", "/annunci/"]
-ABS_HOSTS = [
-    "https://www.subito.it", "http://www.subito.it",
-    "https://m.subito.it",   "http://m.subito.it",
-]
+# ---- URL patterns
+AD_HREF_PATTERNS = ["/annuci/","/annunci/","/annuncio","/ann/","/vi/","/ad/"]
+ABS_HOSTS = ["https://www.subito.it","http://www.subito.it","https://m.subito.it","http://m.subito.it"]
 
 # ---------------- Heuristics ----------------
 
@@ -164,24 +163,20 @@ def is_ad_href(href: Optional[str]) -> bool:
 # ---------------- Helpers Playwright ----------------
 
 def accept_cookies_if_present(page: Page):
-    texts = ["Accetta", "Accetta tutto", "Accetta e chiudi", "Acconsenti", "Consent", "Accept all"]
-    for t in texts:
-        try:
-            btn = page.locator(f"button:has-text('{t}')").first
+    try:
+        for lab in ("Accetta", "Accetta tutto", "Accetta e chiudi", "Acconsenti", "Accept all"):
+            btn = page.locator(f"button:has-text('{lab}')").first
             if btn and btn.is_visible():
-                btn.click(timeout=3000); time.sleep(0.2); print(f"[COOKIE] Accettato (root:{t})"); return
-        except Exception:
-            pass
+                btn.click(timeout=3000); time.sleep(0.2); print(f"[COOKIE] Accettato (root:{lab})"); return
+    except Exception: pass
     try:
         for frame in page.frames:
             try:
                 fbtn = frame.locator("button[data-testid='uc-accept-all-button']").first
                 if fbtn and fbtn.is_visible():
                     fbtn.click(timeout=3000); print("[COOKIE] Accettato (iframe)"); return
-            except Exception:
-                continue
-    except Exception:
-        pass
+            except Exception: continue
+    except Exception: pass
 
 
 def humanize(page: Page):
@@ -205,13 +200,11 @@ def query_from_url(url: str) -> Optional[str]:
     except Exception:
         return None
 
-# ---------------- Rilevamento spedizione ----------------
+# ---------------- Shipping helpers ----------------
 
-SHIPPING_KEYS = [
-    "shipping","spedizione","delivery","deliveryOptions","delivery_available","isShipping",
-    "is_shippable","shippable","shippingAvailable","hasShipping","tutelato","isTutelato","is_fbb"
+SHIPPING_TEXT_KWS = [
+    "spedizione", "sped.", "acquisto tutelato", "tutelato", "consegna"
 ]
-SHIPPING_TEXT_KWS = ["spedizione", "sped.", "tutelato", "acquisto tutelato", "consegna"]
 
 
 def dict_has_shipping(d: Dict) -> bool:
@@ -236,15 +229,14 @@ def dict_has_shipping(d: Dict) -> bool:
 
 # ---------------- Estrattori ----------------
 
-
-def collect_ads_dom(page: Page, min_cards=1, loops=20, pause_ms=650) -> List[Dict]:
+def collect_ads_dom(page: Page, min_cards=1, loops=18, pause_ms=700) -> List[Dict]:
     seen = {}
     for _ in range(loops):
         loc = page.locator(
             "a[href*='/ann'], a[href*='/vi/'], a[href*='/ad/'], a[href*='/annuncio'], a[href*='/annunci/'], "
-            "article a[href], [data-testid*='list'] a[href], [class*='item-card'] a[href], [data-item-id] a[href]"
+            "a:has(h2), a:has(h3), a:has([data-testid='ad-title'])"
         )
-        try: count = min(loc.count(), 600)
+        try: count = min(loc.count(), 500)
         except Exception: count = 0
         for i in range(count):
             a = loc.nth(i)
@@ -270,17 +262,16 @@ def collect_ads_dom(page: Page, min_cards=1, loops=20, pause_ms=650) -> List[Dic
                         prezzo = (p.text_content() or "").strip()
                         if prezzo: break
                 except Exception: continue
-            # shipping dal testo della card
+            # shipping dal testo visibile
             sped = False
             try:
                 txt = (a.inner_text() or "").lower()
                 if any(kw in txt for kw in SHIPPING_TEXT_KWS):
                     sped = True
-            except Exception:
-                pass
+            except Exception: pass
             seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D", "spedizione": sped})
         if len(seen) >= min_cards: break
-        page.evaluate("window.scrollBy(0, Math.max(2400, window.innerHeight));")
+        page.evaluate("window.scrollBy(0, Math.max(1400, window.innerHeight));")
         page.wait_for_timeout(pause_ms)
     return list(seen.values())
 
@@ -322,6 +313,7 @@ def collect_ads_structured(page: Page) -> List[Dict]:
             for it in obj: _walk_collect(it, out)
 
     out: Dict[str, Dict] = {}
+    # JSON-LD
     try:
         els = page.locator("script[type='application/ld+json']")
         for i in range(min(els.count(), 80)):
@@ -330,19 +322,22 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 if not raw: continue
                 data = json.loads(raw)
                 _walk_collect(data, out)
-            except Exception: continue
-    except Exception: pass
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # __NEXT_DATA__
     try:
         nd = page.locator("script#__NEXT_DATA__")
         if nd and nd.count() > 0:
             raw = nd.first.text_content()
             if raw:
                 data = json.loads(raw); _walk_collect(data, out)
-    except Exception: pass
+    except Exception:
+        pass
     return list(out.values())
 
-# ------------ GLOBAL NETWORK TAP (tollerante) ------------
-
+# ------------ GLOBAL NETWORK TAP (più tollerante) ------------
 NETWORK_BUF: Dict[str, Dict] = {}
 
 
@@ -366,8 +361,7 @@ def network_tap_on_response(resp: Response):
                 if k in obj and obj[k]: return str(obj[k])
         return None
     def _ad_from_dict(d: Dict) -> Optional[Dict]:
-        link = (d.get("url") or d.get("href") or d.get("canonicalUrl")
-                or d.get("canonical_url") or d.get("webUrl"))
+        link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url") or d.get("webUrl")
         if not link or not is_ad_href(link): return None
         titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
         prezzo = _maybe_price(d)
@@ -384,15 +378,8 @@ def network_tap_on_response(resp: Response):
     _walk_collect(data, NETWORK_BUF)
 
 # ------------ Regex fallback su HTML ------------
-
-AD_REGEX = re.compile(
-    r"https?://(?:www\.)?subito\.it/[^\s\"'<>]*/(?:ann|vi|ad)[^\s\"'<>]+",
-    re.IGNORECASE
-)
-REL_REGEX = re.compile(
-    r"['\"](/(?:ann|vi|ad)[^'\"<>]+)['\"]",
-    re.IGNORECASE
-)
+AD_REGEX = re.compile(r"https?://(?:www\.)?subito\.it/[^\s\"'<>]*/(?:ann|vi|ad)[^\s\"'<>]+", re.IGNORECASE)
+REL_REGEX = re.compile(r"['\"](/(?:ann|vi|ad)[^'\"<>]+)['\"]", re.IGNORECASE)
 
 
 def collect_ads_regex(page: Page) -> List[Dict]:
@@ -400,17 +387,20 @@ def collect_ads_regex(page: Page) -> List[Dict]:
     candidates = set(AD_REGEX.findall(html))
     for m in REL_REGEX.findall(html):
         candidates.add(urljoin("https://www.subito.it", m))
-    return [{"link": link, "titolo": "(da regex)", "prezzo": "N/D", "spedizione": False} for link in candidates]
+    out = []
+    for link in candidates:
+        if is_ad_href(link):
+            out.append({"link": link, "titolo": "(da regex)", "prezzo": "N/D", "spedizione": False})
+    return out
 
-# ------------ Enrichment su dettaglio annuncio (opzionale) ------------
+# ------------ Enrichment: visita alcuni dettagli per riconoscere la spedizione ------------
 
-def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 10, per_timeout: int = 6000) -> None:
-    """Per gli annunci senza flag spedizione, visita fino a max_check pagine e cerca badge/testi."""
+def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 8, per_timeout: int = 6000) -> None:
     todo = [a for a in ads if not a.get("spedizione")]
     random.shuffle(todo)
     todo = todo[:max_check]
     for a in todo:
-        url = a.get("link")
+        url = a.get("link");
         if not url: continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=per_timeout)
@@ -424,9 +414,9 @@ def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 10
 
 # ------------ Mobile/RSS fallback ------------
 
-
 def try_mobile_and_rss(page: Page, query: str) -> List[Dict]:
     results: Dict[str, Dict] = {}
+    # Mobile
     try:
         murl = f"https://m.subito.it/annunci-italia/?q={query}"
         page.goto(murl, wait_until="domcontentloaded", timeout=20000, referer="https://m.subito.it/")
@@ -444,6 +434,7 @@ def try_mobile_and_rss(page: Page, query: str) -> List[Dict]:
             results.setdefault(href, {"link": href, "titolo": titolo, "prezzo": "N/D", "spedizione": sped})
     except Exception:
         pass
+    # RSS (best-effort)
     try:
         rss = f"https://www.subito.it/annunci-italia/vendita/?q={query}&format=rss"
         page.goto(rss, wait_until="domcontentloaded", timeout=15000, referer="https://www.subito.it/")
@@ -455,7 +446,6 @@ def try_mobile_and_rss(page: Page, query: str) -> List[Dict]:
     return list(results.values())
 
 # ------------ Flow di ricerca ------------
-
 
 def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
     try:
@@ -491,31 +481,31 @@ def simulate_search_flow(page: Page, query: str, wait_ms=12000) -> bool:
 
 # ------------ Esecuzione singola ricerca ------------
 
-
 def run_search(page: Page, cfg: Dict) -> List[Dict]:
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
 
     # 1) URL diretto
     try:
-        page.goto(target, wait_until="domcontentloaded", timeout=30000, referer="https://www.subito.it/")
-        try: page.wait_for_load_state("networkidle", timeout=15000)
+        page.goto(target, wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
+        try: page.wait_for_load_state("networkidle", timeout=12000)
         except PWTimeout: pass
         accept_cookies_if_present(page); humanize(page)
     except Exception:
         q = query_from_url(target) or cfg.get("nome_ricerca")
         print(f"[FLOW] Problema accesso diretto → simulo ricerca per '{q}'")
         if not simulate_search_flow(page, q):
-            print(f"[{nome}] Search flow desktop KO → provo mobile/RSS")
-            return try_mobile_and_rss(page, q)
+            print(f"[{nome}] Fallito anche search flow di base → provo mobile/RSS")
+            extra = try_mobile_and_rss(page, q)
+            return extra
 
-    # 2) Prima raccolta: DOM + Structured + Regex
-    dom_ads    = collect_ads_dom(page, min_cards=1, loops=20, pause_ms=600)
-    struct_ads = collect_ads_structured(page)
-    regex_ads  = collect_ads_regex(page)
+    # 2) Prima raccolta: DOM + Regex + Structured
+    dom_ads   = collect_ads_dom(page, min_cards=1, loops=18, pause_ms=600)
+    regex_ads = collect_ads_regex(page)
+    struct_ads= collect_ads_structured(page)
 
-    # 3) Dai tempo al network tap
-    page.wait_for_timeout(1800)
+    # 3) Se ancora pochi risultati, dai tempo al network (TAP globale)
+    page.wait_for_timeout(1500)
     net_ads = list(NETWORK_BUF.values())
 
     # 4) Merge con priorità network > DOM > JSON > regex
@@ -543,14 +533,14 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
 
     print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} REGEX:{len(regex_ads)} → tot unici: {len(ads)}")
 
-    # Enrichment su un sottoinsieme: prova a riconoscere badge spedizione aprendo il dettaglio (max 10)
+    # Enrichment: se nessuna card ha spedizione, controlla qualche dettaglio
     before = sum(1 for a in ads if a.get("spedizione"))
     if before == 0:
-        enrich_shipping_from_detail(page, ads, max_check=10)
+        enrich_shipping_from_detail(page, ads, max_check=8)
     after = sum(1 for a in ads if a.get("spedizione"))
     print(f"[{nome}] Spedizione True: prima={before} dopo={after}")
 
-    # Filtri + dedup + salvataggio cronologia – **richiedi spedizione**
+    # Filtri + dedup + salvataggio cronologia (solo spedizione)
     prev = carica_link_precedenti(cfg["file_cronologia"])
     out = []
     for ann in ads:
@@ -570,11 +560,11 @@ def run_search(page: Page, cfg: Dict) -> List[Dict]:
         out.append(ann)
 
     print(f"[{nome}] Nuove pertinenti (con spedizione): {len(out)}")
+    # segna come visti solo gli annunci inviati (non quelli scartati)
     salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
     return out
 
 # ---------------- MAIN ----------------
-
 
 def main():
     print("[BOOT] Avvio bot (Playwright + Chrome stable headful)…")
@@ -607,15 +597,15 @@ def main():
         context.set_extra_http_headers(extra_headers)
         context.add_init_script(STEALTH_JS)
 
-        # GLOBAL NETWORK TAP — prima di QUALSIASI navigazione
+        # **GLOBAL NETWORK TAP** — prima di QUALSIASI navigazione
         context.on("response", network_tap_on_response)
 
         page = context.new_page()
 
         # Warm-up + cookie
         try:
-            page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=30000, referer="https://www.subito.it/")
-            try: page.wait_for_load_state("networkidle", timeout=12000)
+            page.goto("https://www.subito.it", wait_until="domcontentloaded", timeout=25000, referer="https://www.subito.it/")
+            try: page.wait_for_load_state("networkidle", timeout=8000)
             except PWTimeout: pass
             accept_cookies_if_present(page); humanize(page)
         except Exception: pass
