@@ -1,20 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor – Playwright headful – V5.2 (Mobile anti-challenge, file-only patch)
-- UA/contesto mobile iPhone per ridurre i challenge.
+Subito.it monitor – Playwright headful – V6.0 (Mobile anti-challenge + robust link handling)
+- UA/contesto mobile iPhone per ridurre i challenge anti-bot.
+- Retry automatico su m.subito.it se rilevata "verifica/captcha".
 - Stealth import robusto + fallback manuale (fix "'module' object is not callable").
-- Retry automatico su m.subito.it se rilevo "captcha"/"verifica".
 - Selettori estesi per layout mobile (li[data-testid='result-list-item']).
+- Handler rete blindato (try/except) + normalizzazione link (str|dict|list).
 - Cookie accept migliorato (root + iframe UC).
 - Test Telegram all'avvio per separare scraping vs invio.
 """
 
-import os, re, time, random, json, requests
+import os
+import re
+import time
+import random
+import json
+import requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, urlunparse
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
 
-# =============== CONFIG DI BASE (immutata) ===============
+# =============== CONFIG DI BASE ===============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
     os.path.join(BASE_DIR, "bot_annunci.yml"),
@@ -148,13 +154,40 @@ def invia_test_telegram():
 AD_HREF_PATTERNS = ["/annunci/", "/annuncio", "/ann/", "/vi/", "/ad/"]
 ABS_HOSTS = ["https://www.subito.it","https://m.subito.it","http://www.subito.it","http://m.subito.it"]
 
-def is_ad_href(href: Optional[str]) -> bool:
+def is_ad_href(href) -> bool:
+    """Accetta string, dict, list/tuple e normalizza; True solo se è un link annuncio valido."""
     if not href:
         return False
-    if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
-        return True
-    if href.startswith("/") and any(p in href for p in AD_HREF_PATTERNS):
-        return True
+
+    # Se il backend manda strutture complesse, normalizza:
+    if isinstance(href, dict):
+        href = (href.get("url") or href.get("href") or href.get("canonicalUrl")
+                or href.get("canonical_url") or href.get("webUrl") or href.get("path") or "")
+    elif isinstance(href, (list, tuple)):
+        # basta che uno degli elementi sia un link valido
+        for it in href:
+            if is_ad_href(it):
+                return True
+        return False
+
+    if not isinstance(href, str):
+        try:
+            href = str(href)
+        except Exception:
+            return False
+
+    href = href.strip()
+    if not href:
+        return False
+
+    # link assoluto o relativo a /ann
+    try:
+        if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
+            return True
+        if href.startswith("/") and any(p in href for p in AD_HREF_PATTERNS):
+            return True
+    except Exception:
+        return False
     return False
 
 def accept_cookies_if_present(page: Page):
@@ -243,7 +276,7 @@ def collect_ads_dom(page: Page, loops=18, pause_ms=700) -> List[Dict]:
                 href = link_el.get_attribute("href")
             except Exception:
                 href = None
-            if not is_ad_href(href): 
+            if not is_ad_href(href):
                 continue
             titolo = ""
             try:
@@ -286,14 +319,27 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 p = obj.get("price") or obj.get("lowPrice")
                 if p: return f"{p} EUR"
         return None
+
     def _ad_from_dict(d: Dict) -> Optional[Dict]:
         link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url") or d.get("webUrl")
-        if not link or not is_ad_href(link): return None
+        # NORMALIZZA link se non è stringa
+        if isinstance(link, dict):
+            link = (link.get("url") or link.get("href") or link.get("canonicalUrl")
+                    or link.get("canonical_url") or link.get("webUrl") or link.get("path"))
+        elif isinstance(link, (list, tuple)):
+            for it in link:
+                if is_ad_href(it):
+                    link = it
+                    break
+
+        if not link or not is_ad_href(link): 
+            return None
         titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
         prezzo = _maybe_price(d)
         sped = dict_has_shipping(d)
         if not prezzo and "offers" in d and isinstance(d["offers"], (dict, list)):
-            if isinstance(d["offers"], dict): prezzo = _maybe_price(d["offers"]) or prezzo
+            if isinstance(d["offers"], dict): 
+                prezzo = _maybe_price(d["offers"]) or prezzo
             else:
                 for off in d["offers"]:
                     prezzo = _maybe_price(off) or prezzo
@@ -301,14 +347,18 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                         sped = True
                     if prezzo: break
         return {"link": link, "titolo": str(titolo or "(senza titolo)"), "prezzo": str(prezzo or "N/D"), "spedizione": bool(sped)}
+
     def _walk_collect(obj: Any, out: Dict):
         if isinstance(obj, dict):
             cand = _ad_from_dict(obj)
             if cand and cand["link"] not in out:
                 out[cand["link"]] = cand
-            for v in obj.values(): _walk_collect(v, out)
+            for v in obj.values():
+                _walk_collect(v, out)
         elif isinstance(obj, list):
-            for it in obj: _walk_collect(it, out)
+            for it in obj:
+                _walk_collect(it, out)
+
     out: Dict[str, Dict] = {}
     try:
         els = page.locator("script[type='application/ld+json']")
@@ -317,51 +367,73 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 raw = els.nth(i).text_content()
                 if not raw: continue
                 data = json.loads(raw); _walk_collect(data, out)
-            except Exception: continue
-    except Exception: pass
+            except Exception:
+                continue
+    except Exception:
+        pass
     try:
         nd = page.locator("script#__NEXT_DATA__")
         if nd and nd.count() > 0:
             raw = nd.first.text_content()
             if raw:
                 data = json.loads(raw); _walk_collect(data, out)
-    except Exception: pass
+    except Exception:
+        pass
     return list(out.values())
 
 NETWORK_BUF: Dict[str, Dict] = {}
 def network_tap_on_response(resp: Response):
     try:
         body = resp.text()
-    except Exception:
-        return
-    if not body or len(body) < 80: return
-    s = body.lstrip()
-    if not s or s[0] not in "[{": return
-    try:
+        if not body or len(body) < 80:
+            return
+        s = body.lstrip()
+        if not s or s[0] not in "[{":
+            return
         data = json.loads(s)
-    except Exception:
+
+        def _maybe_price(obj: Any) -> Optional[str]:
+            if isinstance(obj, dict):
+                for k in ("price","priceLabel","price_value","priceValue","prezzo","amount","lowPrice"):
+                    if k in obj and obj[k]: return str(obj[k])
+            return None
+
+        def _ad_from_dict(d: Dict) -> Optional[Dict]:
+            link = (d.get("url") or d.get("href") or d.get("canonicalUrl") or
+                    d.get("canonical_url") or d.get("webUrl"))
+            # NORMALIZZA link se non è stringa
+            if isinstance(link, dict):
+                link = (link.get("url") or link.get("href") or link.get("canonicalUrl")
+                        or link.get("canonical_url") or link.get("webUrl") or link.get("path"))
+            elif isinstance(link, (list, tuple)):
+                for it in link:
+                    if is_ad_href(it):
+                        link = it
+                        break
+
+            if not link or not is_ad_href(link): 
+                return None
+            titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
+            prezzo = _maybe_price(d)
+            sped = dict_has_shipping(d)
+            return {"link": link, "titolo": str(titolo or "(senza titolo)"), "prezzo": str(prezzo or "N/D"), "spedizione": bool(sped)}
+
+        def _walk_collect(obj: Any, out: Dict):
+            if isinstance(obj, dict):
+                cand = _ad_from_dict(obj)
+                if cand and cand["link"] not in out:
+                    out[cand["link"]] = cand
+                for v in obj.values():
+                    _walk_collect(v, out)
+            elif isinstance(obj, list):
+                for it in obj:
+                    _walk_collect(it, out)
+
+        _walk_collect(data, NETWORK_BUF)
+    except Exception as e:
+        # Non deve mai far crashare il loop Playwright
+        print(f"[NET] Skip response ({type(e).__name__}): {e}")
         return
-    def _maybe_price(obj: Any) -> Optional[str]:
-        if isinstance(obj, dict):
-            for k in ("price","priceLabel","price_value","priceValue","prezzo","amount","lowPrice"):
-                if k in obj and obj[k]: return str(obj[k])
-        return None
-    def _ad_from_dict(d: Dict) -> Optional[Dict]:
-        link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url") or d.get("webUrl")
-        if not link or not is_ad_href(link): return None
-        titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
-        prezzo = _maybe_price(d)
-        sped = dict_has_shipping(d)
-        return {"link": link, "titolo": str(titolo or "(senza titolo)"), "prezzo": str(prezzo or "N/D"), "spedizione": bool(sped)}
-    def _walk_collect(obj: Any, out: Dict):
-        if isinstance(obj, dict):
-            cand = _ad_from_dict(obj)
-            if cand and cand["link"] not in out:
-                out[cand["link"]] = cand
-            for v in obj.values(): _walk_collect(v, out)
-        elif isinstance(obj, list):
-            for it in obj: _walk_collect(it, out)
-    _walk_collect(data, NETWORK_BUF)
 
 def _norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
