@@ -1,26 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Subito.it monitor – Playwright headful – V6.0 (Mobile anti-challenge + robust link handling)
-- UA/contesto mobile iPhone per ridurre i challenge anti-bot.
-- Retry automatico su m.subito.it se rilevata "verifica/captcha".
-- Stealth import robusto + fallback manuale (fix "'module' object is not callable").
-- Selettori estesi per layout mobile (li[data-testid='result-list-item']).
-- Handler rete blindato (try/except) + normalizzazione link (str|dict|list).
-- Cookie accept migliorato (root + iframe UC).
-- Test Telegram all'avvio per separare scraping vs invio.
+Subito.it monitor – V7.2 (JSON-only net tap + WebKit fallback + anti-challenge)
+- Net tap: analizza SOLO risposte con Content-Type JSON. Niente decode di binari/compressi.
+- Anti-bot: UA/contesto mobile + retry m.subito.it + detection captcha/verify.
+- Fallback: se TUTTE le ricerche risultano bloccate con Chromium, riprova con WebKit (Safari-like).
+- Link robusti (str|dict|list), selettori anche mobile, cookie accept rinforzato.
+- Test Telegram all'avvio.
 """
 
-import os
-import re
-import time
-import random
-import json
-import requests
-from typing import Dict, List, Optional, Any
+import os, re, time, random, json, requests
+from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlparse, urlunparse
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response, Browser, BrowserContext
 
-# =============== CONFIG DI BASE ===============
+# ================== CONFIG ==================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
     os.path.join(BASE_DIR, "bot_annunci.yml"),
@@ -53,7 +46,7 @@ DEFAULT_RICERCHE = [
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# =============== UTILITY ===============
+# ================== UTILS ==================
 def _ensure_abs_cronofile(entry: Dict) -> Dict:
     fname = entry.get("file_cronologia")
     if not fname:
@@ -108,7 +101,7 @@ def salva_link_attuali(path: str, link_set: set):
     except Exception:
         pass
 
-# =============== TELEGRAM ===============
+# ================== TELEGRAM ==================
 def _autodetect_chat_id(token: str) -> Optional[str]:
     try:
         r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10)
@@ -150,7 +143,7 @@ def invia_test_telegram():
     if not ok:
         print("[TG] Test fallito: controlla TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
 
-# =============== ANTI-BOT / NAVIGAZIONE ===============
+# ================== ANTI-BOT / NAVIGAZIONE ==================
 AD_HREF_PATTERNS = ["/annunci/", "/annuncio", "/ann/", "/vi/", "/ad/"]
 ABS_HOSTS = ["https://www.subito.it","https://m.subito.it","http://www.subito.it","http://m.subito.it"]
 
@@ -158,29 +151,19 @@ def is_ad_href(href) -> bool:
     """Accetta string, dict, list/tuple e normalizza; True solo se è un link annuncio valido."""
     if not href:
         return False
-
-    # Se il backend manda strutture complesse, normalizza:
     if isinstance(href, dict):
         href = (href.get("url") or href.get("href") or href.get("canonicalUrl")
                 or href.get("canonical_url") or href.get("webUrl") or href.get("path") or "")
     elif isinstance(href, (list, tuple)):
-        # basta che uno degli elementi sia un link valido
         for it in href:
-            if is_ad_href(it):
+            if is_ad_href(it):  # ricorsivo
                 return True
         return False
-
     if not isinstance(href, str):
-        try:
-            href = str(href)
-        except Exception:
-            return False
-
+        try: href = str(href)
+        except Exception: return False
     href = href.strip()
-    if not href:
-        return False
-
-    # link assoluto o relativo a /ann
+    if not href: return False
     try:
         if any(href.startswith(h) for h in ABS_HOSTS) and any(p in href for p in AD_HREF_PATTERNS):
             return True
@@ -213,17 +196,28 @@ def accept_cookies_if_present(page: Page):
     except Exception:
         pass
 
-def _goto_with_challenge_retry(page: Page, url: str, timeout: int = 35000):
+def _looks_like_challenge(html_lower: str) -> bool:
+    keys = [
+        "captcha", "verifica di sicurezza", "verifica che sei un umano",
+        "challenge", "just a moment", "are you human", "denylist", "blocked"
+    ]
+    return any(k in html_lower for k in keys)
+
+def _goto_with_challenge_retry(page: Page, url: str, timeout: int = 35000) -> bool:
     page.goto(url, wait_until="domcontentloaded", timeout=timeout)
     txt = (page.content() or "").lower()
-    if any(k in txt for k in ["captcha", "verifica di sicurezza", "verifica che sei un umano", "challenge"]):
-        print("[ANTI-BOT] Rilevata pagina di verifica. Riprovo su m.subito.it…")
+    if _looks_like_challenge(txt):
+        print("[ANTI-BOT] Verifica rilevata. Riprovo su m.subito.it…")
         u = list(urlparse(url))
         if "subito.it" in u[1] and not u[1].startswith("m."):
             u[1] = "m.subito.it"
             mobile = urlunparse(u)
             page.wait_for_timeout(1200)
             page.goto(mobile, wait_until="domcontentloaded", timeout=timeout)
+            txt2 = (page.content() or "").lower()
+            if _looks_like_challenge(txt2):
+                return False
+    return True
 
 def humanize(page: Page):
     try:
@@ -254,14 +248,14 @@ def dict_has_shipping(d: Dict) -> bool:
         return False
     return False
 
-# =============== RACCOLTA ANNUNCI ===============
+# ================== RACCOLTA ANNUNCI ==================
 def collect_ads_dom(page: Page, loops=18, pause_ms=700) -> List[Dict]:
     seen = {}
     for _ in range(loops):
         loc = page.locator(
             "div[class*='items-container'] div[class*='item-card'], "
             "div[data-testid*='ad-card'], "
-            "li[data-testid='result-list-item']"  # layout mobile
+            "li[data-testid='result-list-item']"  # mobile
         )
         try:
             count = min(loc.count(), 600)
@@ -322,7 +316,6 @@ def collect_ads_structured(page: Page) -> List[Dict]:
 
     def _ad_from_dict(d: Dict) -> Optional[Dict]:
         link = d.get("url") or d.get("href") or d.get("canonicalUrl") or d.get("canonical_url") or d.get("webUrl")
-        # NORMALIZZA link se non è stringa
         if isinstance(link, dict):
             link = (link.get("url") or link.get("href") or link.get("canonicalUrl")
                     or link.get("canonical_url") or link.get("webUrl") or link.get("path"))
@@ -331,7 +324,6 @@ def collect_ads_structured(page: Page) -> List[Dict]:
                 if is_ad_href(it):
                     link = it
                     break
-
         if not link or not is_ad_href(link): 
             return None
         titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
@@ -381,13 +373,26 @@ def collect_ads_structured(page: Page) -> List[Dict]:
         pass
     return list(out.values())
 
+# ============== NET TAP (JSON-ONLY, SILENT FAIL) ==============
 NETWORK_BUF: Dict[str, Dict] = {}
-def network_tap_on_response(resp: Response):
+
+def _is_json_content(resp: Response) -> bool:
     try:
-        body = resp.text()
-        if not body or len(body) < 80:
+        ct = (resp.headers or {}).get("content-type", "") or resp.header_value("content-type") or ""
+        ct = ct.lower()
+        return ("application/json" in ct) or ("text/json" in ct) or ("application/ld+json" in ct) or ct.endswith("+json")
+    except Exception:
+        return False
+
+def network_tap_on_response(resp: Response):
+    # Considera solo JSON; ignora tutto il resto (immagini, html, js, ecc.)
+    if not _is_json_content(resp):
+        return
+    try:
+        body_text = resp.text()
+        if not body_text:
             return
-        s = body.lstrip()
+        s = body_text.lstrip()
         if not s or s[0] not in "[{":
             return
         data = json.loads(s)
@@ -401,16 +406,13 @@ def network_tap_on_response(resp: Response):
         def _ad_from_dict(d: Dict) -> Optional[Dict]:
             link = (d.get("url") or d.get("href") or d.get("canonicalUrl") or
                     d.get("canonical_url") or d.get("webUrl"))
-            # NORMALIZZA link se non è stringa
             if isinstance(link, dict):
                 link = (link.get("url") or link.get("href") or link.get("canonicalUrl")
                         or link.get("canonical_url") or link.get("webUrl") or link.get("path"))
             elif isinstance(link, (list, tuple)):
                 for it in link:
                     if is_ad_href(it):
-                        link = it
-                        break
-
+                        link = it; break
             if not link or not is_ad_href(link): 
                 return None
             titolo = d.get("title") or d.get("subject") or d.get("name") or d.get("headline")
@@ -430,11 +432,11 @@ def network_tap_on_response(resp: Response):
                     _walk_collect(it, out)
 
         _walk_collect(data, NETWORK_BUF)
-    except Exception as e:
-        # Non deve mai far crashare il loop Playwright
-        print(f"[NET] Skip response ({type(e).__name__}): {e}")
+    except Exception:
+        # Silenzioso: non vogliamo rumore da decode/network
         return
 
+# ================== MATCHING/FILTRI ==================
 def _norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
 
@@ -448,17 +450,13 @@ def _match_keywords(title: str, includes: List[str], excludes: List[str]) -> boo
     return True
 
 def _parse_price_to_float(price_txt: str) -> Optional[float]:
-    if not price_txt:
-        return None
+    if not price_txt: return None
     m = re.search(r"(\d{1,3}(?:[\.\s]\d{3})*|\d+)(?:[,\.\s](\d{2}))?", price_txt.replace("€"," ").replace("EUR"," "))
-    if not m:
-        return None
+    if not m: return None
     intp = m.group(1).replace(".","").replace(" ","")
     decp = m.group(2) or "00"
-    try:
-        return float(f"{intp}.{decp}")
-    except Exception:
-        return None
+    try: return float(f"{intp}.{decp}")
+    except Exception: return None
 
 def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 6, per_timeout: int = 7000) -> None:
     todo = [a for a in ads if not a.get("spedizione")]
@@ -482,187 +480,11 @@ def enrich_shipping_from_detail(page: Page, ads: List[Dict], max_check: int = 6,
         except Exception:
             continue
 
-# =============== PIPELINE DI RICERCA ===============
-def run_search(page: Page, cfg: Dict) -> List[Dict]:
+# ================== PIPELINE DI RICERCA ==================
+def run_search(page: Page, cfg: Dict) -> Tuple[List[Dict], bool]:
+    """Ritorna (risultati, blocked_flag)."""
     nome = cfg["nome_ricerca"]; target = cfg["url"]
     print(f"\n--- Ricerca: {nome} ---")
     NETWORK_BUF.clear()
     try:
-        _goto_with_challenge_retry(page, target, timeout=35000)
-        accept_cookies_if_present(page)
-        page.wait_for_selector(
-            "div[class*='items-container'], div[data-testid*='ad-card'], li[data-testid='result-list-item']",
-            timeout=25000
-        )
-        print(f"[{nome}] Pagina caricata, estraggo.")
-    except PWTimeout:
-        sp = os.path.join(BASE_DIR, f"errore_blocco_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.png")
-        hp = os.path.join(BASE_DIR, f"dump_blocco_{re.sub(r'[^a-z0-9]+','_', nome.lower())}.html")
-        try: page.screenshot(path=sp, full_page=True)
-        except Exception: pass
-        try:
-            with open(hp,"w",encoding="utf-8") as f: f.write(page.content())
-        except Exception: pass
-        print(f"[{nome}] ERRORE: Probabile blocco/CAPTCHA. Screenshot: {sp}")
-        return []
-    except Exception as e:
-        print(f"[{nome}] Errore imprevisto: {e}")
-        return []
-
-    humanize(page)
-    dom_ads    = collect_ads_dom(page)
-    struct_ads = collect_ads_structured(page)
-    page.wait_for_timeout(1200)
-    net_ads = list(NETWORK_BUF.values())
-
-    merged: Dict[str, Dict] = {}
-    for lst in (net_ads, dom_ads, struct_ads):
-        for a in lst:
-            if "link" in a and is_ad_href(a["link"]):
-                merged.setdefault(a["link"], a)
-    ads = list(merged.values())
-
-    if not ads:
-        print(f"[{nome}] Nessun annuncio trovato dopo merge (possibile challenge invisibile).")
-        return []
-
-    print(f"[{nome}] NET:{len(net_ads)} DOM:{len(dom_ads)} JSON:{len(struct_ads)} → unici: {len(ads)}")
-
-    before = sum(1 for a in ads if a.get("spedizione"))
-    enrich_shipping_from_detail(page, ads, max_check=6)
-    after = sum(1 for a in ads if a.get("spedizione"))
-    if after > before:
-        print(f"[{nome}] Spedizione True: prima={before} dopo={after} (+enrichment)")
-    else:
-        print(f"[{nome}] Spedizione True: {after} (niente extra)")
-
-    prev = carica_link_precedenti(cfg["file_cronologia"])
-    out = []
-    scartati_per_filtri = 0
-
-    for ann in ads:
-        title = ann.get("titolo") or ""
-        prezzo_txt = ann.get("prezzo") or ""
-        price_val = _parse_price_to_float(prezzo_txt)
-
-        if cfg.get("solo_con_spedizione", True) and not ann.get("spedizione", False):
-            scartati_per_filtri += 1; continue
-        if not _match_keywords(title, cfg.get("keyword_da_includere") or [], cfg.get("keyword_da_escludere") or []):
-            scartati_per_filtri += 1; continue
-        if (price_val is not None) and (price_val > cfg.get("budget_massimo", 9e9)):
-            scartati_per_filtri += 1; continue
-        if ann["link"] in prev:
-            continue
-        out.append(ann)
-
-    tot_sped = sum(1 for a in ads if a.get("spedizione"))
-    print(f"[{nome}] Con spedizione: {tot_sped}. Scartati per filtri/budget: {scartati_per_filtri}. Già visti: {len(ads) - len(out) - scartati_per_filtri}.")
-    print(f"[{nome}] Nuovi pertinenti da notificare: {len(out)}")
-
-    if out:
-        salva_link_attuali(cfg["file_cronologia"], prev | {a["link"] for a in out})
-    else:
-        if tot_sped == 0 and cfg.get("solo_con_spedizione", True):
-            print(f"[{nome}] Niente invio perché nessun annuncio con spedizione è passato i filtri.")
-        elif scartati_per_filtri > 0:
-            print(f"[{nome}] Niente invio: tutti scartati da include/exclude/budget.")
-        else:
-            print(f"[{nome}] Niente invio: tutti già visti.")
-    return out
-
-# =============== MAIN ===============
-def main():
-    print("[BOOT] Avvio bot (Playwright + Chrome headful)…")
-    cfgs = carica_configurazione()
-    print("[CFG] Attive:", [c["nome_ricerca"] for c in cfgs])
-
-    # Test Telegram
-    invia_test_telegram()
-
-    with sync_playwright() as p:
-        # Contesto/UA MOBILE (meno challenge)
-        ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
-
-        browser = p.chromium.launch(
-            channel="chrome",
-            headless=False,
-            args=[
-                "--lang=it-IT",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage"
-            ]
-        )
-        context = browser.new_context(
-            locale="it-IT",
-            timezone_id="Europe/Rome",
-            user_agent=ua,
-            viewport={"width": 390, "height": 844},
-            device_scale_factor=3,
-            is_mobile=True,
-            has_touch=True
-        )
-
-        # Tappa analytics/ads/fonts (meno fingerprint/rumore)
-        def _router(route):
-            url = route.request.url
-            if any(x in url for x in [".ttf",".woff",".woff2","/gtm.js","/tag/js","/analytics","googletagmanager","doubleclick"]):
-                return route.abort()
-            return route.continue_()
-        context.route("**/*", _router)
-
-        context.on("response", network_tap_on_response)
-        page = context.new_page()
-
-        # STEALTH robusto + fallback manuale
-        use_stealth = False
-        try:
-            from playwright_stealth import stealth_sync as _stealth
-            use_stealth = True
-        except Exception:
-            use_stealth = False
-
-        if use_stealth:
-            try:
-                _stealth(page)
-                print("[STEALTH] Ok (playwright_stealth)")
-            except Exception as e:
-                print(f"[STEALTH] Warning: {e} (uso fallback)")
-                use_stealth = False
-
-        if not use_stealth:
-            page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                window.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'languages', {get: () => ['it-IT','it']});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                const origQuery = window.navigator.permissions?.query;
-                if (origQuery) {
-                  window.navigator.permissions.query = (p) =>
-                    p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : origQuery(p);
-                }
-            """)
-
-        nuovi = {}
-        for cfg in cfgs:
-            res = run_search(page, cfg)
-            if res: nuovi[cfg["nome_ricerca"]] = res
-            time.sleep(random.randint(4, 8))
-
-        context.close(); browser.close()
-
-    if nuovi:
-        msg = "<b>Nuove offerte trovate!</b>\n\n"
-        for categoria, lista in nuovi.items():
-            msg += f"<b>— {categoria.upper()} —</b>\n"
-            for a in sorted(lista, key=lambda x: _norm_text(x.get('titolo',''))):
-                sped = " [SPEDIZIONE]" if a.get("spedizione") else ""
-                msg += f"{a.get('titolo','(senza titolo)')} - <b>{a.get('prezzo','N/D')}</b>{sped}\n<a href='{a['link']}'>Vedi annuncio</a>\n\n"
-        sent = invia_notifica_telegram(msg)
-        if not sent:
-            print("[DONE] Avevo novità ma l'invio Telegram è fallito. Vedi log [TG].")
-    else:
-        print("[DONE] Nessun nuovo annuncio da notificare in questa esecuzione.")
-
-if __name__ == "__main__":
-    main()
+        ok = _goto_with_challenge_retry(page, tar
