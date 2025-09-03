@@ -1,3 +1,5 @@
 playwright
 pyyaml
 requests
+playwright-stealth
+
