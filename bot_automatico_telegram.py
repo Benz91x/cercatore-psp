@@ -13,7 +13,7 @@ import os, re, time, random, json, requests
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, parse_qs, urljoin
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
-from playwright_stealth import stealth_sync # <-- RIGA CORRETTA!
+from playwright_stealth.stealth import stealth_sync # <-- Corretto l'import per la nuova versione della libreria
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YAML_CANDIDATES = [
