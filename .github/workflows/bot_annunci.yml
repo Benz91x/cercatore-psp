@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # ci serve per committare lo storico
+  contents: write   # per committare lo storico
 
 concurrency:
   group: psp-finder
