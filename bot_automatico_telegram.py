@@ -20,7 +20,9 @@ TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
 # ---------------- util ----------------
 def _canon(url: Optional[str]) -> Optional[str]:
+    """Assolutizza e rimuove query/fragment per dedup robusto."""
     if not url: return None
+    url = url.strip()
     if url.startswith("/"): url = urljoin(BASE_HOST, url)
     if not url.startswith("http"): return url
     p = urlsplit(url)
@@ -42,21 +44,30 @@ def save_history(path: str, links: set) -> None:
         pass
 
 def send_telegram(msg: str) -> None:
-    if not TELEGRAM_BOT_TOKEN: print("[TG] manca TELEGRAM_BOT_TOKEN"); return
+    if not TELEGRAM_BOT_TOKEN:
+        print("[TG] manca TELEGRAM_BOT_TOKEN"); return
     chat_id = TELEGRAM_CHAT_ID
     if not chat_id:
         try:
             r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates", timeout=10).json()
             for it in reversed(r.get("result", [])):
                 m = it.get("message") or it.get("channel_post")
-                if m and m.get("chat", {}).get("id"): chat_id = str(m["chat"]["id"]); break
+                if m and m.get("chat", {}).get("id"):
+                    chat_id = str(m["chat"]["id"]); break
         except Exception: pass
-        if not chat_id: print("[TG] manca TELEGRAM_CHAT_ID"); return
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        data={"chat_id": chat_id, "text": msg, "parse_mode":"HTML","disable_web_page_preview":True}, timeout=20
-    )
+        if not chat_id:
+            print("[TG] manca TELEGRAM_CHAT_ID"); return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": chat_id, "text": msg, "parse_mode":"HTML", "disable_web_page_preview":True},
+            timeout=20
+        )
+        print("[TG] Notifica inviata.")
+    except Exception as e:
+        print(f"[TG] Invio fallito: {e}")
 
+# ---------------- parsing helpers ----------------
 AD_RE_ABS = re.compile(r"https?://(?:www\.)?subito\.it/(?:vi/\d+|[a-z0-9\-]+/.+?-\d+\.htm)\b", re.I)
 AD_RE_REL = re.compile(r"^/(?:vi/\d+|[a-z0-9\-]+/.+?-\d+\.htm)\b", re.I)
 def is_ad_href(href: Optional[str]) -> bool:
@@ -64,11 +75,13 @@ def is_ad_href(href: Optional[str]) -> bool:
 
 def euros_to_float(txt: str) -> Optional[float]:
     if not txt: return None
-    t = txt.replace(".", "").replace(",", "."); m = re.search(r"(\d+(?:\.\d+)?)", t)
+    t = txt.replace(".", "").replace(",", ".")
+    m = re.search(r"(\d+(?:\.\d+)?)", t)
     return float(m.group(1)) if m else None
 
 def has_venduto_text(s: str) -> bool:
-    t = (s or "").lower(); return any(k in t for k in ("venduto", "venduta", "sold"))
+    t = (s or "").lower()
+    return any(k in t for k in ("venduto", "venduta", "sold"))
 
 def accept_cookies(page: Page):
     for lab in ("Accetta", "Accetta tutto", "Acconsenti", "Accept all"):
@@ -89,10 +102,10 @@ def human_scroll(page: Page, loops=8, pause_ms=350):
         page.evaluate("window.scrollBy(0, Math.max(800, window.innerHeight));")
         page.wait_for_timeout(pause_ms)
 
-# ----------- estrazione da __NEXT_DATA__/API -----------
+# ----------- __NEXT_DATA__/API -----------
 def _first_value(values: Any) -> Optional[str]:
     if isinstance(values, list) and values:
-        v = values[0]; 
+        v = values[0]
         if isinstance(v, dict): return str(v.get("value") or v.get("key") or "").strip()
     return None
 
@@ -133,7 +146,8 @@ def extract_from_nextdata(raw_json: str) -> List[Dict]:
                 if "/price" in features:
                     price = _first_value(features["/price"].get("values"))
                     if price and "€" not in price: price = f"{price} €"
-                ad = {"link": link, "titolo": str(title), "prezzo": price or "N/D", "spedizione": _is_shippable(features), "venduto": False}
+                ad = {"link": link, "titolo": str(title), "prezzo": price or "N/D",
+                      "spedizione": _is_shippable(features), "venduto": False}
                 if is_ad_href(link): out.setdefault(link, ad)
             for v in obj.values(): walk(v)
         elif isinstance(obj, list):
@@ -149,22 +163,31 @@ def collect_dom(page: Page) -> List[Dict]:
         try: href = _canon(a.get_attribute("href"))
         except Exception: href = None
         if not is_ad_href(href): continue
+
         titolo = ""
         for sel in ("[data-testid='ad-title']","h2","h3","span"):
             try:
                 el = a.locator(sel).first
                 if el and el.is_visible():
-                    titolo = (el.text_content() or "").strip(); 
+                    titolo = (el.text_content() or "").strip()
                     if titolo: break
             except Exception: pass
         if not titolo:
             try: titolo = (a.get_attribute("aria-label") or a.get_attribute("title") or "").strip()
             except Exception: pass
-        inner = (a.inner_text() or "")
+
+        inner = ""
+        try: inner = (a.inner_text() or "")
+        except Exception: pass
+
         m = list(re.finditer(r"\d+(?:[.,]\d{1,2})?\s*€", inner))
         prezzo = m[-1].group(0) if m else None
-        seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D",
-                               "spedizione": True, "venduto": has_venduto_text(inner) or has_venduto_text(prezzo or "") or has_venduto_text(titolo)})
+
+        seen.setdefault(href, {
+            "link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D",
+            "spedizione": True,  # siamo su shp=true
+            "venduto": has_venduto_text(inner) or has_venduto_text(prezzo or "") or has_venduto_text(titolo),
+        })
     return list(seen.values())
 
 NETWORK_BAG: Dict[str, Dict] = {}
@@ -176,11 +199,12 @@ def on_response(resp: Response):
     except Exception: return
     if not body or len(body) < 80: return
     s = body.lstrip()
-    if s[0] not in "[{]": return
+    if s[0] not in "[{": return
     try: data = json.loads(s)
     except Exception: return
     for ad in extract_from_nextdata(json.dumps(data)):
-        if ad.get("link"): NETWORK_BAG.setdefault(ad["link"], ad)
+        link = _canon(ad.get("link"))
+        if link: ad["link"] = link; NETWORK_BAG.setdefault(link, ad)
 
 # ---------------- main ----------------
 def main():
@@ -189,7 +213,7 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=False,
+            headless=False,  # su Actions: xvfb-run -a python -u bot_automatico_telegram.py
             args=["--lang=it-IT","--disable-blink-features=AutomationControlled","--disable-dev-shm-usage"],
         )
         context = browser.new_context(
@@ -205,6 +229,7 @@ def main():
         except PWTimeout: pass
         accept_cookies(page); human_scroll(page)
 
+        # 1) __NEXT_DATA__
         ads_struct = []
         try:
             nd = page.locator("script#__NEXT_DATA__").first
@@ -213,9 +238,11 @@ def main():
                 if raw: ads_struct = extract_from_nextdata(raw)
         except Exception: pass
 
-        time.sleep(0.6); ads_net = list(NETWORK_BAG.values())
+        time.sleep(0.6)
+        ads_net = list(NETWORK_BAG.values())
         ads_dom = collect_dom(page)
 
+        # merge (canon su TUTTI i link)
         merged: Dict[str, Dict] = {}
         for lst in (ads_net, ads_struct, ads_dom):
             for a in lst:
@@ -226,6 +253,7 @@ def main():
         ads = list(merged.values())
         print(f"[DBG] NET:{len(ads_net)} STRUCT:{len(ads_struct)} DOM:{len(ads_dom)} → tot unici:{len(ads)}")
 
+        # filtri finali
         nuovi: List[Dict] = []
         for a in ads:
             if not a.get("spedizione", False): continue
@@ -238,7 +266,7 @@ def main():
 
         print(f"[DBG] Nuovi pertinenti ≤ 50€: {len(nuovi)}")
 
-        # dump sempre utile
+        # dump utile
         try:
             page.screenshot(path=os.path.join(BASE_DIR, "debug_psp.png"), full_page=True)
             with open(os.path.join(BASE_DIR, "debug_psp.html"), "w", encoding="utf-8") as f: f.write(page.content())
@@ -246,14 +274,19 @@ def main():
 
         context.close(); browser.close()
 
-    if nuovi:
-        prev |= {_canon(x["link"]) for x in nuovi}
-        save_history(HISTORY_PATH, prev)
-        msg = "<b>📢 Nuove PSP con spedizione ≤ 50€</b>\n\n"
-        for a in nuovi: msg += f"• {a['titolo']} — <b>{a['prezzo']}</b>\n{a['link']}\n\n"
-        send_telegram(msg)
-    else:
+    if not nuovi:
         print("[DONE] Nessun nuovo annuncio in questa esecuzione.")
+        return
+
+    # Aggiorno lo storico PRIMA di inviare (evita doppioni su retry)
+    prev |= {_canon(x["link"]) for x in nuovi}
+    save_history(HISTORY_PATH, prev)
+
+    # Notifica SOLO dei nuovi
+    msg = "<b>📢 Nuove PSP con spedizione ≤ 50€</b>\n\n"
+    for a in nuovi:
+        msg += f"• {a['titolo']} — <b>{a['prezzo']}</b>\n{a['link']}\n\n"
+    send_telegram(msg)
 
 if __name__ == "__main__":
     main()
