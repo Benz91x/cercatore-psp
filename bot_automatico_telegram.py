@@ -1,135 +1,131 @@
 # -*- coding: utf-8 -*-
 """
-PSP finder – Subito.it listing parser focalizzato su:
-https://www.subito.it/annunci-italia/vendita/videogiochi/?q=psp&shp=true
-
+PSP finder – Subito.it
+Target: https://www.subito.it/annunci-italia/vendita/videogiochi/?q=psp&shp=true
 Regole:
-- Solo annunci con spedizione disponibile
-- Prezzo <= 50 €
-- Notifica solo annunci nuovi (vs report_annunci_psp.txt)
-
-Funziona in GitHub Actions con Chrome headful (xvfb-run).
+  - Solo annunci con spedizione disponibile
+  - Prezzo <= 50 €
+  - Notifica solo annunci nuovi (vs report_annunci_psp.txt)
 """
+
 import os, re, json, time, random, requests
 from typing import Dict, List, Any, Optional
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page
+from urllib.parse import urljoin
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, Response
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+TARGET_URL   = "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=psp&shp=true"
 HISTORY_PATH = os.path.join(BASE_DIR, "report_annunci_psp.txt")
-
-TARGET_URL = "https://www.subito.it/annunci-italia/vendita/videogiochi/?q=psp&shp=true"
-BUDGET_MAX = 50.0
+BUDGET_MAX   = 50.0
+BASE_HOST    = "https://www.subito.it"
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ---------------- Utils FS ----------------
+# ---------------- Utils FS / Telegram ----------------
 def load_history(path: str) -> set:
-    if not os.path.exists(path): return set()
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return set(line.strip() for line in f if line.strip())
+            return {ln.strip() for ln in f if ln.strip()}
     except Exception:
         return set()
 
-def save_history(path: str, links: set):
+def save_history(path: str, links: set) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
-            for link in sorted(links):
-                f.write(link + "\n")
+            for u in sorted(links): f.write(u + "\n")
     except Exception:
         pass
 
-# ---------------- Telegram ----------------
-def send_telegram(msg: str):
-    token = TELEGRAM_BOT_TOKEN; chat_id = TELEGRAM_CHAT_ID
-    if not token:
-        print("[TG] Manca TELEGRAM_BOT_TOKEN"); return
+def send_telegram(msg: str) -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        print("[TG] TELEGRAM_BOT_TOKEN mancante; skip."); return
+    chat_id = TELEGRAM_CHAT_ID
     if not chat_id:
         try:
-            r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10); r.raise_for_status()
-            data = r.json()
-            for item in reversed(data.get("result", [])):
-                m = item.get("message") or item.get("channel_post")
-                if m and m.get("chat",{}).get("id"):
+            r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates", timeout=10)
+            r.raise_for_status()
+            for it in reversed(r.json().get("result", [])):
+                m = it.get("message") or it.get("channel_post")
+                if m and m.get("chat", {}).get("id"):
                     chat_id = str(m["chat"]["id"]); break
         except Exception: pass
         if not chat_id:
-            print("[TG] chat_id non determinato"); return
+            print("[TG] TELEGRAM_CHAT_ID mancante; skip."); return
     try:
         r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": msg, "parse_mode":"HTML", "disable_web_page_preview": True},
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True},
             timeout=20
         )
-        r.raise_for_status()
-        print("[TG] Notifica inviata")
+        r.raise_for_status(); print("[TG] Notifica inviata.")
     except Exception as e:
         print(f"[TG] Invio fallito: {e}")
 
-# ---------------- Helpers UI ----------------
-STEALTH_JS = r"""
-Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
-Object.defineProperty(navigator,'languages',{get:()=>['it-IT','it','en-US','en']});
-Object.defineProperty(navigator,'platform',{get:()=> 'Win32'});
-window.chrome = { runtime: {} };
-"""
+# ---------------- Normalizzazioni ----------------
+def normalize_url(href: Optional[str]) -> Optional[str]:
+    if not href: return None
+    href = href.strip()
+    if href.startswith("http"): return href
+    if href.startswith("/"):   return urljoin(BASE_HOST, href)
+    return href
 
+AD_RE_ABS = re.compile(r"https?://(?:www\.)?subito\.it/(?:vi/\d+|[a-z0-9\-]+/.+?-\d+\.htm)\b", re.I)
+AD_RE_REL = re.compile(r"^/(?:vi/\d+|[a-z0-9\-]+/.+?-\d+\.htm)\b", re.I)
+
+def is_ad_href(href: Optional[str]) -> bool:
+    if not href: return False
+    h = href.strip()
+    return bool(AD_RE_ABS.search(h) or AD_RE_REL.search(h))
+
+def euros_to_float(txt: str) -> Optional[float]:
+    if not txt: return None
+    t = txt.replace(".", "").replace(",", ".")
+    m = re.search(r"(\d+(?:\.\d+)?)", t)
+    return float(m.group(1)) if m else None
+
+# ---------------- Cookie / “human” ----------------
 def accept_cookies(page: Page):
-    # bottone principale
-    try:
-        btn = page.locator("button:has-text('Accetta')").first
-        if btn and btn.is_visible():
-            btn.click(timeout=3000)
-            print("[COOKIE] Accettato: Accetta")
-            return
-    except Exception:
-        pass
-    # fallback iframe (UC)
+    # root
+    for lab in ("Accetta", "Accetta tutto", "Acconsenti", "Accept all"):
+        try:
+            b = page.locator(f"button:has-text('{lab}')").first
+            if b and b.is_visible(): b.click(timeout=2000); print(f"[COOKIE] Accettato: {lab}"); return
+        except Exception: pass
+    # iframe IAB
     try:
         for fr in page.frames:
             try:
-                fbtn = fr.locator("button[data-testid='uc-accept-all-button']").first
-                if fbtn and fbtn.is_visible():
-                    fbtn.click(timeout=3000)
-                    print("[COOKIE] Accettato (iframe UC)")
-                    return
-            except Exception:
-                continue
-    except Exception:
-        pass
+                b = fr.locator("button[data-testid='uc-accept-all-button']").first
+                if b and b.is_visible(): b.click(timeout=2000); print("[COOKIE] Accettato (iframe)"); return
+            except Exception: continue
+    except Exception: pass
 
-# ---------------- Parsing __NEXT_DATA__ ----------------
+def human_scroll(page: Page, loops=8, pause_ms=350):
+    for _ in range(loops):
+        try:
+            page.evaluate("window.scrollBy(0, Math.max(800, window.innerHeight));")
+            page.wait_for_timeout(pause_ms)
+        except Exception: break
+
+# ---------------- Estrattori ----------------
 def _first_value(values: Any) -> Optional[str]:
-    """Estrae il .get('value') o .get('key') dal formato features['/price']['values'][0]."""
     try:
         if isinstance(values, list) and values:
             v = values[0]
-            if isinstance(v, dict):
-                return str(v.get("value") or v.get("key") or "").strip()
-    except Exception:
-        pass
+            if isinstance(v, dict): return str(v.get("value") or v.get("key") or "").strip()
+    except Exception: pass
     return None
 
-def _num_from_price_text(txt: str) -> Optional[float]:
-    if not txt: return None
-    t = txt.replace(".", "").replace(",", ".")
-    m = re.findall(r"\d+(?:\.\d+)?", t)
-    return float(m[0]) if m else None
-
 def _is_shippable(features: Dict[str, Any]) -> bool:
-    # true se: /item_shippable == 1 OR /item_shipping_allowed == 1 OR presente /item_shipping_type
     try:
-        if "/item_shippable" in features:
-            v = _first_value(features["/item_shippable"].get("values"))
-            if v in ("1", "true", "True", "Sì"): return True
-        if "/item_shipping_allowed" in features:
-            v = _first_value(features["/item_shipping_allowed"].get("values"))
-            if v in ("1", "true", "True", "Sì"): return True
-        if "/item_shipping_type" in features:
-            return True
-    except Exception:
-        pass
+        for k in ("/item_shippable", "/item_shipping_allowed"):
+            if k in features:
+                v = _first_value(features[k].get("values"))
+                if str(v).lower() in ("1", "true", "sì", "si"): return True
+        for k in features.keys():
+            if "item_shipping_type" in k or "shipping_cost" in k: return True
+    except Exception: pass
     return False
 
 def _is_sold(features: Dict[str, Any]) -> bool:
@@ -137,55 +133,84 @@ def _is_sold(features: Dict[str, Any]) -> bool:
         if "/transaction_status" in features:
             v = _first_value(features["/transaction_status"].get("values"))
             return (v or "").upper() == "SOLD"
-    except Exception:
-        pass
+    except Exception: pass
     return False
 
-def extract_ads_from_nextdata(raw_json: str) -> List[Dict]:
-    """
-    Cammina tutto __NEXT_DATA__ e raccoglie oggetti che sembrano AdItem:
-    - link: urls.default o urls.mobile
-    - titolo: subject
-    - prezzo: features['/price']
-    - spedizione: da features
-    """
+def extract_from_nextdata(raw_json: str) -> List[Dict]:
     try:
         data = json.loads(raw_json)
     except Exception:
         return []
-    collected: Dict[str, Dict] = {}
-
+    out: Dict[str, Dict] = {}
     def walk(obj: Any):
         if isinstance(obj, dict):
-            # pattern AdItem "piatto": ha 'features' e 'urls' e magari 'subject'
             if "features" in obj and "urls" in obj and isinstance(obj["urls"], dict):
-                features = obj.get("features", {})
-                if _is_sold(features):   # salta annunci marcati SOLD
-                    return
-                link = obj["urls"].get("default") or obj["urls"].get("mobile")
-                if link and "/annunci/" in link:
-                    title = obj.get("subject") or obj.get("title") or obj.get("name") or "(senza titolo)"
-                    price_txt = None
-                    if "/price" in features:
-                        price_txt = _first_value(features["/price"].get("values"))
-                        # normalizza con € se manca
-                        if price_txt and "€" not in price_txt:
-                            price_txt = f"{price_txt} €"
-                    ad = {
-                        "link": link,
-                        "titolo": str(title),
-                        "prezzo": price_txt or "N/D",
-                        "spedizione": _is_shippable(features),
-                    }
-                    collected.setdefault(link, ad)
-            # continua cammino
-            for v in obj.values():
-                walk(v)
+                if _is_sold(obj["features"]): return
+                link  = obj["urls"].get("default") or obj["urls"].get("mobile")
+                title = obj.get("subject") or obj.get("title") or obj.get("name") or "(senza titolo)"
+                price = None
+                if "/price" in obj["features"]:
+                    price = _first_value(obj["features"]["/price"].get("values"))
+                    if price and "€" not in price: price = f"{price} €"
+                ad = {
+                    "link": link,
+                    "titolo": str(title),
+                    "prezzo": price or "N/D",
+                    "spedizione": _is_shippable(obj["features"]),
+                }
+                if is_ad_href(link): out.setdefault(link, ad)
+            for v in obj.values(): walk(v)
         elif isinstance(obj, list):
             for it in obj: walk(it)
-
     walk(data)
-    return list(collected.values())
+    return list(out.values())
+
+def collect_dom(page: Page) -> List[Dict]:
+    seen: Dict[str, Dict] = {}
+    loc = page.locator("a[href*='.htm'], a[href*='/vi/']")
+    try: n = min(loc.count(), 600)
+    except Exception: n = 0
+    for i in range(n):
+        a = loc.nth(i)
+        try: href = normalize_url(a.get_attribute("href"))
+        except Exception: href = None
+        if not is_ad_href(href): continue
+        titolo = ""
+        for sel in ("[data-testid='ad-title']", "h2", "h3", "span"):
+            try:
+                el = a.locator(sel).first
+                if el and el.is_visible():
+                    titolo = (el.text_content() or "").strip()
+                    if titolo: break
+            except Exception: pass
+        if not titolo:
+            try: titolo = (a.get_attribute("aria-label") or a.get_attribute("title") or "").strip()
+            except Exception: pass
+        # best effort per il prezzo
+        prezzo = None
+        try:
+            tx = (a.inner_text() or "")
+            m = list(re.finditer(r"\d+(?:[.,]\d{1,2})?\s*€", tx))
+            if m: prezzo = m[-1].group(0)
+        except Exception: pass
+        seen.setdefault(href, {"link": href, "titolo": titolo or "(senza titolo)", "prezzo": prezzo or "N/D", "spedizione": True})  # shp=true
+    return list(seen.values())
+
+NETWORK_BAG: Dict[str, Dict] = {}
+def on_response(resp: Response):
+    try:
+        ct = (resp.headers or {}).get("content-type", "").lower()
+    except Exception:
+        ct = ""
+    if "json" not in ct: return
+    try: body = resp.text()
+    except Exception: return
+    if not body or len(body) < 100: return
+    try: data = json.loads(body)
+    except Exception: return
+    # riusa la stessa logica del nextdata
+    for ad in extract_from_nextdata(json.dumps(data)):
+        NETWORK_BAG.setdefault(ad["link"], ad)
 
 # ---------------- MAIN ----------------
 def main():
@@ -195,76 +220,79 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(
             channel="chrome",
-            headless=False,
-            args=["--lang=it-IT","--disable-blink-features=AutomationControlled","--disable-dev-shm-usage"]
+            headless=False,  # su Actions: xvfb-run -a python -u bot_automatico_telegram.py
+            args=["--lang=it-IT", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
         )
         context = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
-            user_agent=f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.choice([121,122,123])}.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
+            user_agent=f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.choice([123,124,125])}.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768},
         )
-        context.add_init_script(STEALTH_JS)
+        context.on("response", on_response)
         page = context.new_page()
 
+        # Naviga, cookie, scroll per caricare lazy-cards
+        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+        try: page.wait_for_load_state("networkidle", timeout=7000)
+        except PWTimeout: pass
+        accept_cookies(page)
+        human_scroll(page)
+
+        # 1) __NEXT_DATA__
+        ads_struct = []
         try:
-            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=25000)
-            try: page.wait_for_load_state("networkidle", timeout=8000)
-            except PWTimeout: pass
-            accept_cookies(page)
-        except Exception:
-            print("[ERR] Navigazione iniziale fallita")
-            context.close(); browser.close()
-            return
+            nd = page.locator("script#__NEXT_DATA__").first
+            if nd and nd.count() > 0:
+                raw = nd.text_content()
+                if raw: ads_struct = extract_from_nextdata(raw)
+        except Exception: pass
 
-        # estrai __NEXT_DATA__
-        next_el = page.locator("script#__NEXT_DATA__").first
-        ads: List[Dict] = []
-        if next_el and next_el.count() > 0:
-            raw = next_el.text_content()
-            if raw:
-                ads = extract_ads_from_nextdata(raw)
+        # 2) Network tap (se la pagina fetcha altro JSON)
+        time.sleep(0.6)
+        ads_net = list(NETWORK_BAG.values())
 
-        # Fallback molto leggero: anche listing-schema (AggregateOffer) NON contiene i link singoli → inutile.
-        tot = len(ads)
-        # Filtra: spedizione, PSP nel titolo, prezzo <= 50, non già inviati
-        nuovi: List[Dict] = []
+        # 3) DOM (con link .htm)
+        ads_dom = collect_dom(page)
+
+        # merge
+        merged: Dict[str, Dict] = {}
+        for lst in (ads_net, ads_struct, ads_dom):
+            for a in lst:
+                if a.get("link"): merged.setdefault(a["link"], a)
+        ads = list(merged.values())
+
+        print(f"[DBG] NET:{len(ads_net)} STRUCT:{len(ads_struct)} DOM:{len(ads_dom)} → tot unici:{len(ads)}")
+
+        # Filtri finali (spedizione già vera: shp=true/feature), PSP nel titolo, prezzo <= 50, non in storico
+        nuovi = []
         for a in ads:
-            if not a.get("spedizione", False):
-                continue
-            title_l = (a.get("titolo") or "").lower()
-            if "psp" not in title_l:
-                continue
-            price_val = _num_from_price_text(a.get("prezzo") or "")
-            if price_val is None or price_val > BUDGET_MAX:
-                continue
-            if a["link"] in prev:
-                continue
+            if not a.get("spedizione", False): continue
+            if "psp" not in (a.get("titolo") or "").lower(): continue
+            price = euros_to_float(a.get("prezzo") or "")
+            if price is None or price > BUDGET_MAX: continue
+            if a["link"] in prev: continue
             nuovi.append(a)
 
-        print(f"[DBG] NET:0 STRUCT:{tot} DOM:0 → tot unici:{tot}")
         print(f"[DBG] Nuovi pertinenti ≤ 50€: {len(nuovi)}")
 
-        # dump di supporto
+        # debug dump utile se qualcosa va storto
         try:
             page.screenshot(path=os.path.join(BASE_DIR, "debug_psp.png"), full_page=True)
             with open(os.path.join(BASE_DIR, "debug_psp.html"), "w", encoding="utf-8") as f:
                 f.write(page.content())
-            print(f"[DBG] Dump salvato: {os.path.join(BASE_DIR,'debug_psp.png')} — {os.path.join(BASE_DIR,'debug_psp.html')}")
-        except Exception:
-            pass
+        except Exception: pass
 
         context.close(); browser.close()
 
     if nuovi:
-        # aggiorna storico PRIMA di inviare (così eviti doppioni in eventuali retry)
-        new_links = prev | {x["link"] for x in nuovi}
-        save_history(HISTORY_PATH, new_links)
+        # aggiorno storico PRIMA dell'invio per evitare doppioni su retry
+        prev |= {x["link"] for x in nuovi}
+        save_history(HISTORY_PATH, prev)
 
-        # notifica
         msg = "<b>📢 Nuove PSP con spedizione ≤ 50€</b>\n\n"
         for a in nuovi:
-            msg += f"• {a['titolo']} — <b>{a['prezzo']}</b>\n<a href='{a['link']}'>Apri annuncio</a>\n\n"
+            msg += f"• {a['titolo']} — <b>{a['prezzo']}</b>\n{a['link']}\n\n"
         send_telegram(msg)
     else:
         print("[DONE] Nessun nuovo annuncio in questa esecuzione.")
