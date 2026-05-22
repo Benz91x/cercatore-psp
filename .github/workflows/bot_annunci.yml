@@ -3,10 +3,7 @@ name: Bot Subito
 permissions:
   contents: write
 
-on:
-  schedule:
-    - cron: '*/30 7-20 * * *'  # esempio: ogni 30' in orario diurno
-  workflow_dispatch:
+on: []  # workflow disabilitato
 
 jobs:
   run-bot:
